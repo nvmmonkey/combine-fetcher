@@ -48,7 +48,8 @@ const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 /// Maximum number of reconnection attempts before giving up (0 = infinite)
 const MAX_RECONNECT_ATTEMPTS: u32 = 0;
 /// Silent disconnect threshold: if no data received for this long while "connected", force reconnect (milliseconds)
-const SILENT_DISCONNECT_THRESHOLD_MS: i64 = 10000;
+/// Set to 30s to accommodate natural quiet periods in short-duration (15-min) options markets
+const SILENT_DISCONNECT_THRESHOLD_MS: i64 = 30000;
 /// Health check interval: how often to check for silent disconnects (seconds)
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 

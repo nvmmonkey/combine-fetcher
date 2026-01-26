@@ -1,639 +1,280 @@
-# Combined Fix Summary - Combine Fetcher
+# Combine Fetcher - Current State Summary
 
-This document consolidates all fixes (FIX1 through FIX7) applied to the combine-fetcher project.
-
----
-
-## Table of Contents
-
-1. [FIX1: Import Resolution](#fix1-import-resolution)
-2. [FIX2: Historical Bootstrap Implementation](#fix2-historical-bootstrap-implementation)
-3. [FIX3: Option Data Calculation](#fix3-option-data-calculation---volatility-and-greeks-formula)
-4. [FIX4: CSV Recording Frequency Control](#fix4-csv-recording-frequency-control)
-5. [FIX5: time_to_open Field Semantics](#fix5-time_to_open-field-semantics---verification)
-6. [FIX6: Polymarket SDK Usage Verification](#fix6-polymarket-sdk-usage-verification-and-subscription-cleanup)
-7. [FIX7: Code Quality Refactoring](#fix7-code-quality-refactoring---2025-01-20)
+This document describes the current state of the combine-fetcher program after all fixes and improvements.
 
 ---
 
-## FIX1: Import Resolution
+## Overview
 
-### Problem Summary
+The `combine-fetcher` is a Rust application that combines real-time market data from Binance and Polymarket for options pricing analysis. It supports two modes of operation:
 
-The `market_data.csv` showed incorrect streaming data with missing volume data and stuck bid/ask prices at default values.
-
-### Files Modified
-
-| File | Changes |
-|------|---------|
-| `src/api/binance.rs` | Added @aggTrade stream, volume tracking |
-| `src/api/polymarket.rs` | Replaced with dual-feed architecture |
-| `src/api/mod.rs` | Updated exports |
+1. **Single Market Logger** (`data_logger`) - Logs data for a single market
+2. **Multi-Market Logger** (`multi_market_logger`) - Automatically rotates through markets as they expire
 
 ---
 
-## FIX2: Historical Bootstrap Implementation
+## Architecture
 
-### Problem Summary
+### Data Sources
 
-**Current vs Expected Behavior:**
+| Source | WebSocket Streams | Data Provided |
+|--------|------------------|---------------|
+| **Binance** | `@aggTrade`, `@bookTicker` | Price, volume, volatility, bid/ask |
+| **Polymarket** | Price feed, Orderbook feed (via SDK v0.4.1) | YES/NO bid/ask, sizes |
 
-The `market_data.csv` showed incorrect streaming data:
-- `realized_volatility=0.3` constant value (stuck at hardcoded clamp minimum)
-- `binance_volume=0.00` (no volume data being captured)
-- `yes_bid=0.01` and `yes_ask=0.99` (stuck at default/min-max values)
-- Data appeared to be using fallback/default values instead of real-time updates
+### Core Modules
 
-**Expected Behavior:**
-- Real-time volatility from Fibonacci multi-timeframe calculator
-- Immediate valid volatility on startup (not waiting for WebSocket accumulation)
-- Volatility range below 0.30 during calm market periods
-- Real-time Binance volume data from @aggTrade WebSocket stream
-- Dynamic Polymarket YES/NO bid/ask prices updating based on actual orderbook
+| Module | Purpose |
+|--------|---------|
+| `src/api/binance.rs` | Binance WebSocket + REST, volatility tracking, volume tracking |
+| `src/api/polymarket.rs` | Polymarket SDK v0.4.1 wrapper, dual-feed architecture, health monitoring |
+| `src/volatility.rs` | Fibonacci multi-timeframe volatility calculator with Welford's algorithm |
+| `src/latency_tracker.rs` | WebSocket latency tracking |
+| `src/bin/multi_market_logger.rs` | Multi-market data logger with auto-rotation |
+| `src/main.rs` | Single-market data logger |
 
-### Root Cause Analysis
-
-#### 1. Hardcoded Volatility Clamp (FIXED)
-
-**Problem:** The `realized_volatility` was stuck at 0.3 due to hardcoded clamp minimum in `src/volatility.rs:208`.
-
-**Fix Applied:**
-- Changed clamp from `annualized.clamp(0.30, 3.0)` to `annualized.clamp(0.05, 3.0)`
-- Allows volatility to go below 0.30 during calm market periods
-
-#### 2. Missing Historical Bootstrap (FIXED - 2026-01-21)
-
-**Problem:** Volatility calculators started empty, requiring time to accumulate WebSocket data before providing valid readings.
-
-**Fix Applied:**
-- Added `bootstrap_historical()` method to `FibonacciVolatilityCalculator` (volatility.rs lines 298-388)
-- Fetches 1000 1-minute candles from Binance REST API: `/api/v3/klines?symbol={symbol}&interval=1m&limit=1000`
-- Provides ~16.7 hours of historical data immediately on startup
-- Populates ONLY `price_buffer_1min` buffer (unified buffer reserved for real-time tick data)
-- Has retry logic (1 retry after 1 second)
-- Falls back to symbol-specific default volatility on API failure
-
-**NOTE:** FIX3 corrected this - original FIX2 had bug where unified buffer was populated. The unified buffer should only receive real-time tick data, not historical bootstrap data.
-
-#### 3. BootstrapResult Enum (NEW)
-
-```rust
-pub enum BootstrapResult {
-    Success,           // Bootstrap succeeded on first attempt
-    SuccessAfterRetry, // Bootstrap succeeded after retry
-    UsingDefault { symbol: String, default_vol: f64 },
-}
-```
-
-#### 4. Symbol-Specific Defaults (DECISION - 2026-01-21)
-
-**Decision:** Kept current symbol-based defaults instead of 0.5.
-
-| Symbol | Default Volatility | Rationale |
-|--------|-------------------|-----------|
-| BTCUSDT | 0.55 (55%) | Historically grounded for Bitcoin |
-| ETHUSDT | 0.65 (65%) | Ethereum typically more volatile |
-| SOLUSDT | 0.75 (75%) | Solana highest volatility |
-| Other | 0.65 (65%) | Uses ETH default as baseline |
-
-**Analysis:**
-- vol=0.5 is less accurate than symbol-based defaults
-- Current defaults (BTC: 0.55) are historically grounded
-- Bootstrap provides real data; fallback only used on API failure
-
-#### 5. Missing Volume Stream (FIXED)
-
-**Problem:** The combine-fetcher only implemented `@bookTicker` stream but NOT `@aggTrade` stream for volume.
-
-**Fix Applied:**
-- Added `BinanceAggTradeEvent` struct to parse trade messages
-- Added second WebSocket connection for `@aggTrade` stream
-- Added `volume` field to `BinancePrice` struct
-- Implemented `aggtrade_connection_loop()` for volume updates
-
-#### 6. Incomplete Polymarket Integration (FIXED)
-
-**Problem:** Polymarket orderbook was not using dual-feed architecture (price + orderbook streams).
-
-**Fix Applied:**
-- Replaced simple orderbook-only stream with dual-feed architecture
-- Added `subscribe_prices()` for best bid/ask prices
-- Maintained `subscribe_orderbook()` for liquidity sizes
-- Added health monitoring and REST API fallback
-
-#### 7. Borrow Errors in binance.rs (FIXED)
-
-**Problem:** After adding volume tracking, `symbol` was moved before being used in debug! macro.
-
-**Fix Applied:**
-- Changed `prices_guard.insert(symbol, price)` to `prices_guard.insert(symbol.clone(), price)`
-- Same fix for aggTrade message handler
-
-### Implementation Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Historical bootstrap | COMPLETED | 1000 candles, ~16.7 hours data |
-| Bootstrap with retry | COMPLETED | 1 retry after 1 second |
-| Symbol-specific defaults | COMPLETED | BTC: 0.55, ETH: 0.65, SOL: 0.75 |
-| BootstrapResult enum | COMPLETED | Success, SuccessAfterRetry, UsingDefault |
-| BinanceDataManager integration | COMPLETED | Lines 246-286 in binance.rs |
-| multi_market_logger integration | COMPLETED | Lines 402-414 |
-| Binance @aggTrade stream | DONE | Captures real-time volume |
-| Binance volume field | DONE | Added to BinancePrice struct |
-| Polymarket dual stream | DONE | Price + orderbook feeds |
-| REST API fallback | DONE | For stale WebSocket data |
-| Health monitoring | DONE | Silent disconnect detection |
-| Compilation | FIXED | All borrow errors resolved |
-
-**FIX2 vs FIX3 Relationship:**
-- FIX3 supersedes parts of FIX2
-- FIX3 corrected 3 bugs in FIX2 implementation:
-  1. Unified buffer incorrectly populated with historical data
-  2. Single symbol calculator limitation
-  3. Race condition in volume update logic
-
-### Files Modified
-
-| File | Changes |
-|------|---------|
-| `src/volatility.rs` | Added `BootstrapResult` enum (lines 18-27), `bootstrap_historical()` (lines 298-388), `bootstrap_with_fallback()` (lines 406-432), changed clamp to 0.05 |
-| `src/api/binance.rs` | Added `bootstrap_volatility()` method (lines 246-286) |
-| `src/bin/multi_market_logger.rs` | Integrated bootstrap call (lines 402-414) |
-| `src/api/polymarket.rs` | Dual-feed architecture, price + orderbook streams |
-| `src/api/binance.rs` | Added `@aggTrade` stream for volume |
-
-### Test Results
+### File Structure
 
 ```
-running 19 tests
-test volatility::tests::test_bootstrap_result_enum ... ok
-test volatility::tests::test_bootstrap_result_clone ... ok
-test volatility::tests::test_bootstrap_historical_invalid_symbol ... ok
-test volatility::tests::test_bootstrap_historical_btcusdt ... ok
-test volatility::tests::test_bootstrap_with_fallback_always_returns ... ok
-test volatility::tests::test_bootstrap_symbol_case_insensitive ... ok
-test volatility::tests::test_default_volatility_by_symbol ... ok
-test volatility::tests::test_price_tick_creation ... ok
-test volatility::tests::test_volume_tick_creation ... ok
-test volatility::tests::test_volatility_calculator_creation ... ok
-test volatility::tests::test_volatility_calculator_add_price ... ok
-test volatility::tests::test_volatility_calculator_cache ... ok
-test volatility::tests::test_volume_tracker_creation ... ok
-test volatility::tests::test_volume_tracker_add_trade ... ok
-test volatility::tests::test_volume_tracker_cleanup ... ok
-test volatility::tests::test_fibonacci_weights ... ok
-test volatility::tests::test_volatility_regime ... ok
-test volatility::tests::test_shared_calculator_creation ... ok
-test volatility::tests::test_shared_volume_tracker_creation ... ok
-
-test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-```
-
-### Testing Command
-
-```bash
-cd /home/lehash/development/combine-fetcher
-cargo build --release
-./target/release/data_logger 60 test_output.csv
-```
-
-### Expected Behavior After Fix
-
-1. **On startup**: Volatility calculators are immediately warmed with ~16.7 hours of historical data
-2. **During operation**: WebSocket data continuously updates volatility in real-time
-3. **On API failure**: Gracefully falls back to symbol-specific default volatility
-4. **Volatility range**: Can now go below 0.30 during calm market periods (minimum 0.05)
-5. **CSV output**: More accurate `realized_volatility` values reflecting actual market conditions
-
----
-
-## FIX3: Option Data Calculation - Volatility and Greeks Formula
-
-### Problem Summary
-
-**Current vs Expected Behavior:**
-
-The `market_data.csv` showed incorrect option Greeks calculations:
-- `realized_volatility=0.55` constant value (should be real-time calculated)
-- Greeks values using hardcoded 55% volatility instead of market data
-- `delta`, `gamma`, `vega`, `theta` values were incorrect due to wrong formula
-- Missing multi-timeframe volatility analysis for pricing accuracy
-
-**Expected Behavior:**
-- Real-time realized volatility from Fibonacci multi-timeframe calculator
-- Accurate Greeks calculations using proper Black-Scholes formulas for binary options
-- Volume tracking with 1-second and 1-minute rolling windows
-- Volatility regime detection (LOW/NORMAL/HIGH/EXTREME)
-
-### Root Cause Analysis
-
-#### 1. Hardcoded Volatility (FIXED)
-
-**Problem:** Greeks calculations used constant `VOLATILITY_BTC = 0.55` (55%) instead of real-time market volatility.
-
-**Fix Applied:**
-- Created new `src/volatility.rs` module (525 lines)
-- Implemented `FibonacciVolatilityCalculator` using Welford's algorithm
-- Added multi-timeframe analysis: 1s, 5s, 13s, 34s, 89s (Fibonacci sequence)
-- Blended volatility with Fibonacci weights (1:2:3:5:8)
-
-#### 2. Incorrect Greeks Formula (PARTIALLY FIXED)
-
-**Problem:** Binary option Greeks formulas had mathematical errors:
-- Delta formula was using incorrect d2 calculation
-- Vega had wrong sign convention
-- Theta calculation was missing proper annualization
-
-**Fix Applied:**
-- Updated `calculate_greeks()` in `src/main.rs` with corrected formulas
-- Uses real-time `realized_volatility` from `get_market_snapshot()`
-- Proper binary/cash-or-nothing option Greeks implementation
-
-#### 3. Missing Volume Tracking (FIXED)
-
-**Problem:** Volume was showing 0.00 because no volume tracking was implemented.
-
-**Fix Applied:**
-- Added `VolumeTracker` struct with 1-second and 1-minute windows
-- Integrated with `@aggTrade` WebSocket stream for real-time volume
-- Volume spike detection (2x baseline threshold)
-
-### Implementation Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Fibonacci volatility calculator | COMPLETED | 525 lines, Welford's algorithm |
-| Volume tracker | COMPLETED | Rolling window with spike detection |
-| get_market_snapshot() method | COMPLETED | Returns MarketSnapshot with vol data |
-| Greeks formula update | COMPLETED | Uses real-time volatility |
-| Volatility module exports | COMPLETED | Added to lib.rs |
-| Code compilation | COMPLETED | Clean build, no warnings |
-| Tests passing | COMPLETED | 26/26 tests passed |
-| FIX4 verification | COMPLETED | All FIX3 fixes verified in CSV output |
-
-### Files Modified
-
-| File | Changes |
-|------|---------|
-| `src/volatility.rs` | NEW - Fibonacci volatility calculator, VolumeTracker, MarketSnapshot |
-| `src/api/binance.rs` | Added volatility/volume tracking, get_market_snapshot() method |
-| `src/main.rs` | Updated Greeks formula to use real-time volatility |
-| `src/lib.rs` | Added volatility module exports |
-
-### Code Review Findings
-
-**Critical Issues Found - ALL RESOLVED:**
-
-1. **CRITICAL: Greeks Delta Formula Incorrect** - FIXED
-   - **Location:** `src/main.rs:154`
-   - **Issue:** Delta for cash-or-nothing call should use `n_prime_d2` instead of `n_d2`
-   - **Fix Applied:** Changed to `delta: n_prime_d2.clamp(0.0, 1.0)`
-
-2. **CRITICAL: Vega Formula Wrong Sign** - FIXED
-   - **Location:** `src/main.rs:157`
-   - **Issue:** Vega should be POSITIVE for vanilla options
-   - **Fix Applied:** Removed negative sign: `vega: (n_prime_d2 * sqrt_t * 0.01)`
-
-3. **CRITICAL: Potential Deadlock in get_market_snapshot()** - FIXED
-   - **Location:** `src/api/binance.rs:292-321`
-   - **Issue:** Held `prices` read lock while acquiring other locks
-   - **Fix Applied:** Refactored to clone price data first, release lock before acquiring vol/volume locks
-
-4. **CRITICAL: Gamma Formula Denominator** - FIXED
-   - **Location:** `src/main.rs:156`
-   - **Issue:** Incorrect denominator structure
-   - **Fix Applied:** Corrected gamma formula denominator
-
-**Medium Priority Issues - ALL RESOLVED:**
-
-5. **Single Symbol Calculator** - FIXED
-   - **Location:** `src/api/binance.rs:104-107`
-   - **Issue:** Hardcoded to single symbol "BTCUSDT"
-   - **Fix Applied:** Converted to `HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>`
-
-6. **Race Condition in Volume Update** - FIXED
-   - **Location:** `src/api/binance.rs:620-670`
-   - **Issue:** Read-modify-write race condition
-   - **Fix Applied:** Removed atomic operation issue with proper VolumeTracker implementation
-
-7. **Volume Accumulation Issue** - FIXED
-   - **Location:** `src/main.rs:417`
-   - **Issue:** Volume showed cumulative total instead of rolling window
-   - **Fix Applied:** CSV now uses `volume_1min` from rolling window
-
-### Test Results
-
-```
-running 26 tests
-test volatility::tests::test_calculator_initialization ... ok
-test volatility::tests::test_welford_algorithm ... ok
-test volatility::tests::test_multi_timeframe_weights ... ok
-test volatility::tests::test_volatility_clamping ... ok
-test volatility::tests::test_volume_tracker ... ok
-test volatility::tests::test_volume_spike_detection ... ok
-... (26 tests total)
-
-test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+src/
+├── lib.rs                    # Library exports
+├── main.rs                   # Single-market data logger
+├── constants.rs              # Configuration constants
+├── volatility.rs             # Fibonacci volatility calculator
+├── latency_tracker.rs        # Latency tracking
+├── api/
+│   ├── mod.rs                # API module exports
+│   ├── binance.rs            # Binance WebSocket + REST
+│   └── polymarket.rs         # Polymarket SDK wrapper
+└── bin/
+    ├── multi_market_logger.rs  # Multi-market logger (main binary)
+    └── test_binance_bootstrap.rs  # Testing utility
 ```
 
 ---
 
-## FIX4: CSV Recording Frequency Control
+## Key Features
 
-### Problem Summary
+### 1. Real-Time Volatility Calculation
 
-**User Concern:**
+- **Fibonacci multi-timeframe**: 1s, 5s, 13s, 34s, 89s windows
+- **Welford's algorithm**: Online variance calculation for numerical stability
+- **Historical bootstrap**: Fetches 1000 candles (~16.7 hours) on startup via REST API
+- **Volatility regimes**: LOW (<15%), NORMAL (15-30%), HIGH (30-60%), EXTREME (>60%)
+- **Blended volatility**: Weighted average using Fibonacci weights (1:2:3:5:8)
 
-The CSV recording frequency was not configurable and was hardcoded in the application logic.
+### 2. Volume Tracking
 
-**Current vs Expected Behavior:**
+- **1-second and 1-minute rolling windows**
+- **Spike detection**: Alerts when volume exceeds 2x baseline
+- **Real-time updates**: From Binance `@aggTrade` stream
 
-The `market_data.csv` recording was controlled by a hardcoded `MIN_LOG_INTERVAL_MS = 100` constant:
-- CSV rows were written every ~100ms (10 records/second maximum)
-- No way to adjust this without modifying source code
-- No way to disable rate limiting for maximum frequency recording
+### 3. Options Greeks Calculation
 
-**Expected Behavior:**
-- Configurable CSV recording frequency via command-line argument
-- Default behavior maintained at 100ms intervals
-- Option to set interval to 0 for unlimited/unthrottled recording
+Binary/cash-or-nothing option Greeks using Black-Scholes:
 
-### Implementation Status
+- **Delta**: `n'(d2)` - Price sensitivity (clamped 0-1)
+- **Gamma**: Second derivative - Can be negative for OTM binary options
+- **Vega**: Volatility sensitivity (positive for vanilla options)
+- **Theta**: Time decay (negative, per day)
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| New constant `CSV_RECORD_INTERVAL_SEC` | COMPLETED | Added to `src/constants.rs` |
-| CLI argument parsing | COMPLETED | Optional third argument in `main.rs` |
-| Updated rate limiting logic | COMPLETED | Handles 0 = unlimited case |
-| Documentation | COMPLETED | Usage instructions updated |
+### 4. Market Rotation (Multi-Market Logger)
 
-### Files Modified
-
-| File | Changes |
-|------|---------|
-| `src/constants.rs` | Added `CSV_RECORD_INTERVAL_SEC` constant (default 0 = event-driven) |
-| `src/main.rs` | Added CLI argument parsing for custom interval; Updated rate limiting logic |
-
-### Usage
-
-```bash
-# Default event-driven mode (0 = record on stream updates)
-./target/release/data_logger 60 output.csv
-
-# Custom 1-second interval
-./target/release/data_logger 60 output.csv 1
-
-# Custom 5-second interval
-./target/release/data_logger 60 output.csv 5
-```
-
-### Expected Behavior Table
-
-| Interval Value | Behavior | Records/Second | Use Case |
-|----------------|----------|----------------|----------|
-| `0` (default) | Event-driven (on stream updates) | 10-100 | High-frequency analysis, debugging |
-| `1` | 1-second intervals | ~1 | Standard time-series logging |
-| `5` | 5-second intervals | ~0.2 | Reduced file size |
-| `60` | 1-minute intervals | ~0.017 | Long-term monitoring |
+- Automatic detection of market expiry (`resolved = true`)
+- Fetches next active market via Polymarket API
+- **Cooldown mechanism**: 5-second delay between failed fetch attempts
+- **Max retry limit**: Exits after 3 consecutive failures
+- **Infinite strike retry**: Keeps retrying strike fetch until market expires with exponential backoff
 
 ---
 
-## FIX5: time_to_open Field Semantics - Verification
+## CSV Output Format
 
-### Problem Summary
+### Quick Reference Table (45 Columns)
 
-**User Question:**
+| # | Column Name | Type | Units | Section |
+|---|-------------|------|-------|---------|
+| 1 | `timestamp` | String (ISO 8601) | UTC | Market Identity |
+| 2 | `market_slug` | String | - | Market Identity |
+| 3 | `binance_price` | Float | USD (2 decimals) | Binance Data |
+| 4 | `binance_volume` | Float | BTC units (2 decimals) | Binance Data |
+| 5-8 | `yes_bid`, `yes_bid_size`, `yes_ask`, `yes_ask_size` | Float | Price (0-1), token count | Polymarket YES |
+| 9-12 | `no_bid`, `no_bid_size`, `no_ask`, `no_ask_size` | Float | Price (0-1), token count | Polymarket NO |
+| 13 | `time_to_open` | Integer | Seconds | Timing |
+| 14 | `time_to_expiry_minutes` | Float | Minutes (2 decimals) | Timing |
+| 15 | `strike_price` | Float | USD (2 decimals) | Option Parameters |
+| 16 | `realized_volatility` | Float | Annual (6 decimals) | Option Parameters |
+| 17-20 | `delta_yes`, `gamma`, `vega`, `theta` | Float | Dimensionless/USD/day | Greeks |
+| 21 | `market_resolved` | Boolean | true/false | Market State |
+| 22 | `outcome` | String | "YES"/"NO"/"" | Market State |
+| 23-27 | `timestamp_unix_ms`, `binance_update_ms`, `poly_yes_update_ms`, `poly_no_update_ms`, `latency_binance_poly_ms` | Integer | Milliseconds | Latency |
+| 28-30 | `binance_bid`, `binance_ask`, `binance_spread_bps` | Float | USD, basis points | Binance |
+| 31-36 | `vol_1sec`, `vol_5sec`, `vol_13sec`, `vol_34sec`, `vol_89sec`, `volatility_regime` | Float/String | Annual, enum | Volatility |
+| 37-38 | `volume_1sec`, `volume_spike` | Float/Boolean | BTC units, boolean | Volume |
+| 39-41 | `signal_quality`, `trade_confidence`, `vol_data_source` | String/Float | Enum, 0-1, enum | Signal |
+| 42-43 | `yes_spread_bps`, `no_spread_bps` | Float | Basis points | Polymarket |
 
-The CSV output shows negative `time_to_open` values (e.g., -788, -789, -790). User questioned whether this is correct.
+### time_to_open Semantics
 
-**Current vs Expected Behavior:**
-
-| Aspect | Current | Expected |
-|--------|---------|----------|
-| time_to_open when market is open | Negative (e.g., -788) | Negative (seconds since open) |
-| time_to_open when market is pending | Positive | Positive (seconds until open) |
-| time_to_open at market open | 0 | 0 |
-
-**Conclusion:** The current behavior is **CORRECT**. No code changes are needed.
-
-### Semantics of time_to_open
-
-**Definition:**
-```
-time_to_open = window_start - now_ts
-```
-
-**Value Meanings:**
-- **Positive (> 0)**: Market opens in X seconds (pre-market phase)
-- **Zero (= 0)**: Market is opening now
-- **Negative (< 0)**: Market opened X seconds ago (active trading)
-
-**Why This Is Correct:**
-
-1. **Backtesting Compatibility:**
-   - Matches mock data format in `/development/poly-mock-trading/data/option-mock-data.py`
-   - The backtesting strategy uses `if record.time_to_open <= 0` to detect active markets
-   - Negative values indicate "market is open for trading"
-
-### Semantics Reference Table
-
-| time_to_open Value | Meaning | Trading State |
-|--------------------|---------|---------------|
-| > 0 | Market opens in X seconds | PRE-MARKET (no trading) |
+| Value | Meaning | Trading State |
+|-------|---------|---------------|
+| > 0 | Market opens in N seconds | PRE-MARKET (no trading) |
 | = 0 | Market is opening now | MARKET OPEN |
-| < 0 | Market opened X seconds ago | ACTIVE TRADING |
+| < 0 | Market opened N seconds ago | ACTIVE TRADING |
+
+**Important:** Negative values are **correct behavior** - they indicate the market is active.
 
 ---
 
-## FIX6: Polymarket SDK Usage Verification and Subscription Cleanup
+## Usage
 
-### Problem Summary
-
-**Original Request:**
-
-User asked to verify that the logger uses the official polymarket-client-sdk documentation and ensure the endpoint is correct. The original request referenced the official SDK documentation at:
-https://docs.rs/polymarket-client-sdk/0.4.1/polymarket_client_sdk/clob/ws/client/struct.Client.html
-
-**Current vs Expected Behavior:**
-
-| Aspect | Current State | Expected State |
-|--------|---------------|----------------|
-| SDK version | Verified v0.4.1 from crates.io | Using official SDK |
-| WebSocket endpoint | Verified `wss://ws-subscriptions-clob.polymarket.com` | Correct endpoint |
-| Reconnection handling | SDK handles automatically (verified) | Should use SDK built-in |
-| Subscription cleanup | **Fixed** - was leaking tasks | Proper cleanup needed |
-| Multi-market rotation | **Fixed** - tasks accumulated | Clean rotation required |
-
-### Root Cause Analysis
-
-#### 1. SDK Usage Verification (VERIFIED - NO ISSUES)
-
-**Findings:**
-
-1. **SDK Version:** The code correctly uses `polymarket-client-sdk = "0.4.1"` from crates.io
-2. **WebSocket Client Usage:** The code properly uses `WsClient` from the SDK
-3. **Endpoint Verification:** The SDK handles the endpoint internally
-4. **Subscription Methods:** Using official SDK methods
-
-**Conclusion:** The SDK usage is CORRECT and follows official documentation.
-
-#### 2. Duplicate Reconnection Logic (FIXED)
-
-**Problem:** Custom reconnection logic (~480 lines) conflicted with SDK's built-in handling.
-
-**Fix Applied:**
-- Removed all custom reconnection code from `PolymarketOrderbookStream`
-- SDK's `WsClient` handles reconnection automatically
-
-#### 3. Missing Subscription Cleanup (FIXED)
-
-**Problem:** When rotating markets, old subscription tasks were not aborted, causing task accumulation and memory leaks.
-
-**Fix Applied:**
-- Added `SubscriptionTasks` struct to track all active task handles
-- Added `cleanup()` method to `PolymarketOrderbookStream`
-- Modified `stream()` to auto-cleanup before new subscription
-
-#### 4. Multi-Market Logger Task Accumulation (FIXED)
-
-**Problem:** `multi_market_logger.rs` created new receiver tasks on market rotation without cleaning up old ones.
-
-**Fix Applied:**
-- `subscribe_to_market()` helper now called on rotation
-- Old tasks automatically aborted via `cleanup()` triggered by `stream()` method
-
-#### 5. Code Cleanup - Unused Function (FIXED)
-
-**Problem:** `norm_cdf` function in `multi_market_logger.rs` was defined but never used.
-
-**Fix Applied:**
-- Removed unused `norm_cdf` function
-- Greeks calculation uses inline implementation
-
-### Implementation Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| SDK version verification | VERIFIED | v0.4.1 from crates.io |
-| Endpoint verification | VERIFIED | SDK uses correct endpoint |
-| SDK subscription methods | VERIFIED | `subscribe_prices()`, `subscribe_orderbook()` |
-| Duplicate reconnection removal | COMPLETED | ~480 lines removed |
-| SubscriptionTasks struct | COMPLETED | Lines 173-197 in polymarket.rs |
-| cleanup() method | COMPLETED | Lines 320-346 in polymarket.rs |
-| Auto-cleanup on rotation | COMPLETED | Lines 360-364 in polymarket.rs |
-| Multi-market logger fix | COMPLETED | Rotation cleanup in multi_market_logger.rs |
-| Unused code removal | COMPLETED | Removed `norm_cdf` function |
-
-### Files Modified
-
-| File | Changes |
-|------|---------|
-| `src/api/polymarket.rs` | Added `SubscriptionTasks` struct, `cleanup()` method, auto-cleanup in `stream()`, removed ~480 lines of custom reconnection code |
-| `src/bin/multi_market_logger.rs` | Removed unused `norm_cdf` function, uses SDK for subscriptions |
-| `Cargo.toml` | Verified correct SDK version and features |
-
-### Testing Instructions
+### Build
 
 ```bash
 cd /home/lehash/development/combine-fetcher
 cargo build --release
-
-# 10-minute test with market rotation
-./target/release/multi_market_logger 600 test_rotation.csv
 ```
 
-### Usage
+### Multi-Market Logger (Recommended)
 
 ```bash
-# Build
-cargo build --release --bin multi_market_logger
-
-# Run for 8 hours (default), output to overnight_btc_data.csv
+# Default: 8 hours, 1-second interval
 ./target/release/multi_market_logger
 
-# Custom configuration
+# Custom duration (seconds), output file, interval (seconds)
 ./target/release/multi_market_logger 28800 overnight_data.csv 10
 ```
 
-### CSV Output Format
+### Single Market Logger
 
-```csv
-timestamp,market_slug,binance_price,binance_volume,yes_bid,yes_bid_size,yes_ask,yes_ask_size,no_bid,no_bid_size,no_ask,no_ask_size,time_to_open,time_to_expiry_minutes,strike_price,realized_volatility,delta_yes,gamma,vega,theta,market_resolved,outcome
-2026-01-20T10:15:23.456,btc-updown-15m-1737260400,99500.50,1234567.89,0.52,1000,0.53,500,0.47,800,0.48,1200,-300,5.2,99400.00,0.55,0.0234,0.0012,0.0045,-0.0008,false,
+```bash
+# Duration (seconds), output file, recording interval (optional)
+./target/release/data_logger 60 output.csv 1
 ```
+
+### Recording Intervals
+
+| Interval | Records/Second | Use Case |
+|----------|----------------|----------|
+| `0` (default) | 10-100 | Event-driven, high-frequency |
+| `1` | ~1 | Standard time-series logging |
+| `5` | ~0.2 | Reduced file size |
+| `60` | ~0.017 | Long-term monitoring |
 
 ---
 
-## FIX7: Code Quality Refactoring - 2025-01-20
+## Configuration Constants
 
-### Problem Summary
+### Volatility (`src/volatility.rs`)
 
-**Current vs Expected Behavior:**
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `BUFFER_SIZE_1SEC` | 100 | 1-second buffer capacity |
+| `BUFFER_SIZE_89SEC` | 8900 | 89-second buffer capacity |
+| `MIN_VOLATILITY` | 0.05 | Minimum annualized volatility |
+| `MAX_VOLATILITY` | 3.0 | Maximum annualized volatility |
+| `STALE_THRESHOLD_MS` | 5000 | Data staleness threshold |
 
-The codebase had accumulated technical debt from previous fixes, leading to:
-- Duplicate `WsClient` instances in `PolymarketOrderbookStream` (one for prices, one for orderbook)
-- Inline mid-price calculation logic repeated in `multi_market_logger.rs`
-- Scattered market fetching logic with redundant operations
+### Default Volatility by Symbol
 
-**Expected Behavior:**
-- Single `WsClient` instance for all Polymarket subscriptions
-- Extracted helper functions for common calculations
-- Consolidated market fetching with proper type safety
+| Symbol | Default |
+|--------|---------|
+| BTCUSDT | 0.55 (55%) |
+| ETHUSDT | 0.65 (65%) |
+| SOLUSDT | 0.75 (75%) |
+| Other | 0.65 (65%) |
 
-### Changes Summary
+### Polymarket (`src/api/polymarket.rs`)
 
-| File | Change | Lines |
-|------|--------|-------|
-| FIX1.md | SDK verification documentation | Added |
-| polymarket.rs | Single-client architecture | Dual -> single WsClient |
-| polymarket.rs | Extract `calculate_mid_price()` helper | -14 LOC |
-| multi_market_logger.rs | Consolidate market fetching | -37 LOC |
-| multi_market_logger.rs | Add `GammaEventResponse` structs | Type safety |
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SILENT_DISCONNECT_THRESHOLD_MS` | 30000 | Silent disconnect detection (30s) |
+| `HEALTH_CHECK_INTERVAL_SECS` | 5 | Health check frequency |
 
-### Implementation Status
+### Multi-Market Logger
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Single WsClient architecture | COMPLETED | Removed duplicate client |
-| calculate_mid_price() helper | COMPLETED | Extracted to polymarket.rs |
-| Market fetching consolidation | COMPLETED | Reduced code duplication |
-| GammaEventResponse structs | COMPLETED | Type-safe event handling |
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `MAX_CONSECUTIVE_FETCH_FAILURES` | 3 | Exit after N failed market fetches |
+| `FETCH_RETRY_COOLDOWN_MS` | 5000 | Cooldown between failed fetch attempts |
+| `STRIKE_FETCH_DELAY_SEC` | 30 | Delay before fetching strike price |
 
-### Files Modified
+---
 
-| File | Changes |
-|------|---------|
-| `src/api/polymarket.rs` | Single `WsClient`, extracted `calculate_mid_price()` |
-| `src/bin/multi_market_logger.rs` | Consolidated market fetching, added structs |
-| `FIX1.md` | Added SDK verification documentation |
+## Dependencies
 
-### Testing Instructions
+| Dependency | Version | Purpose |
+|------------|---------|---------|
+| `polymarket-client-sdk` | 0.4.1 | Polymarket CLOB + WebSocket |
+| `tokio` | 1.35 | Async runtime |
+| `reqwest` | 0.11 | HTTP client |
+| `dashmap` | 6.1 | Concurrent HashMap |
+| `tracing` | 0.1 | Structured logging |
 
+---
+
+## Important Behaviors
+
+### Strike Price Fetching
+- Strike price is fetched **30 seconds after market start**
+- Uses **infinite retry** with exponential backoff (500ms -> 30s max)
+- Stops retrying if market expires
+- Result is sent via channel and updated in main loop
+- Falls back to spot price if fetch fails
+
+### Health Monitoring
+- Checks WebSocket connection health every 5 seconds
+- Detects silent disconnects (no updates for >30s)
+- Logs warnings but continues operating
+- SDK handles automatic reconnection
+
+### Market Rotation
+- When market expires, fetches next market with `end_tick_gt` parameter
+- 5-second cooldown between failed attempts
+- Exits gracefully after 3 consecutive failures
+- Cleans up old subscription tasks automatically
+
+---
+
+## Known Limitations
+
+1. **Strike Price API**: May fail repeatedly; falls back to spot price after market expiry
+2. **Quiet Markets**: Health monitor may show warnings during low-volume periods
+3. **Volatility Warm-up**: Requires ~90 seconds to fill all buffers after bootstrap
+4. **Single Symbol**: Current implementation tracks one symbol at a time (BTCUSDT default)
+
+---
+
+## Testing
+
+Run unit tests:
 ```bash
-cd /home/lehash/development/combine-fetcher
-cargo build --release
-./target/release/multi_market_logger 600 test_refactor.csv
+cargo test
 ```
+
+Expected: 26 passed tests (volatility calculator, volume tracker, bootstrap)
+
+---
+
+## Fix History Summary
+
+| Date | Fix | One-Line Summary |
+|------|-----|------------------|
+| 2025-01-17 | FIX1 | Initial import resolution and option data structure fixes |
+| 2025-01-17 | FIX2 | Added Binance @aggTrade stream for volume, implemented Polymarket dual-feed architecture |
+| 2025-01-17 | FIX3 | Implemented Fibonacci volatility calculator, corrected Greeks formulas, fixed deadlock risk |
+| 2025-01-17 | FIX4 | Added configurable CSV recording frequency via CLI argument |
+| 2025-01-17 | FIX5 | Verified time_to_open semantics (negative values = active trading) |
+| 2026-01-26 | FIX6 | Verified Polymarket SDK v0.4.1 official usage |
+| 2026-01-26 | FIX7 | Fixed strike price channel communication, updated silent disconnect threshold to 30s |
+| 2026-01-26 | FIX8 | Code quality refactoring |
+| 2026-01-26 | FIX9 | Fixed market rotation race condition, added cooldown and max retry limit, infinite strike retry |
+| 2026-01-26 | FIX10 | Documentation consolidation |
 
 ---
 
 ## Related Documentation
 
 - [README.md](./README.md) - Project overview
-- [MULTI_MARKET_LOGGER.md](./MULTI_MARKET_LOGGER.md) - Multi-market logger usage
+- [CSV_HEADER_DOCUMENTATION.md](./CSV_HEADER_DOCUMENTATION.md) - Complete CSV column definitions (45 fields)
 - [polymarket-client-sdk docs](https://docs.rs/polymarket-client-sdk/0.4.1/polymarket_client_sdk/) - Official SDK documentation
-
----
-
-## Summary of All Fixes
-
-| Fix | Description | Status |
-|-----|-------------|--------|
-| FIX1 | Import Resolution | COMPLETED |
-| FIX2 | Historical Bootstrap Implementation | COMPLETED |
-| FIX3 | Option Data Calculation - Volatility and Greeks Formula | COMPLETED |
-| FIX4 | CSV Recording Frequency Control | COMPLETED |
-| FIX5 | time_to_open Field Semantics Verification | VERIFIED CORRECT |
-| FIX6 | Polymarket SDK Usage Verification and Subscription Cleanup | COMPLETED |
-| FIX7 | Code Quality Refactoring | COMPLETED |
