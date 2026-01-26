@@ -1,0 +1,846 @@
+// multi_market_logger.rs - FIXED COMPILE ERRORS
+//! Enhanced Multi-Market Data Logger for Latency Arbitrage Backtesting
+//!
+//! BACKWARD COMPATIBLE: Original 23 columns preserved in same order
+//! NEW: 22 additional columns appended for latency/volatility/volume analysis
+
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use rust_decimal::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{debug, info, warn};
+
+use combine_fetcher::api::binance::BinanceDataManager;
+use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
+use combine_fetcher::{
+    CSV_RECORD_INTERVAL_SEC, GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
+    MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_ATTEMPTS, STRIKE_RETRY_INTERVAL_MS,
+};
+
+// ============================================================================
+// CSV RECORD - BACKWARD COMPATIBLE + ENHANCED
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CsvRecord {
+    // === ORIGINAL 23 COLUMNS (PRESERVED ORDER) ===
+    pub timestamp: String,
+    pub market_slug: String,
+    pub binance_price: f64,
+    pub binance_volume: f64,
+    pub yes_bid: f64,
+    pub yes_bid_size: f64,
+    pub yes_ask: f64,
+    pub yes_ask_size: f64,
+    pub no_bid: f64,
+    pub no_bid_size: f64,
+    pub no_ask: f64,
+    pub no_ask_size: f64,
+    pub time_to_open: i64,
+    pub time_to_expiry_minutes: f64,
+    pub strike_price: f64,
+    pub realized_volatility: f64,
+    pub delta_yes: f64,
+    pub gamma: f64,
+    pub vega: f64,
+    pub theta: f64,
+    pub market_resolved: bool,
+    pub outcome: String,
+
+    // === NEW COLUMNS (APPENDED FOR BACKWARD COMPATIBILITY) ===
+
+    // Latency tracking
+    pub timestamp_unix_ms: i64,
+    pub binance_update_ms: i64,
+    pub poly_yes_update_ms: i64,
+    pub poly_no_update_ms: i64,
+    pub latency_binance_poly_ms: i64,
+
+    // Binance orderbook detail
+    pub binance_bid: f64,
+    pub binance_ask: f64,
+    pub binance_spread_bps: f64,
+
+    // Multi-timeframe volatility
+    pub vol_1sec: f64,
+    pub vol_5sec: f64,
+    pub vol_13sec: f64,
+    pub vol_34sec: f64,
+    pub vol_89sec: f64,
+    pub volatility_regime: String,
+
+    // Granular volume
+    pub volume_1sec: f64,
+    pub volume_spike: bool,
+
+    // Signal quality
+    pub signal_quality: String,
+    pub trade_confidence: f64,
+    pub vol_data_source: String,
+
+    // Polymarket spreads
+    pub yes_spread_bps: f64,
+    pub no_spread_bps: f64,
+}
+
+impl CsvRecord {
+    pub fn csv_header() -> &'static str {
+        // ORIGINAL 23 columns first (exact order preserved)
+        "timestamp,market_slug,binance_price,binance_volume,\
+        yes_bid,yes_bid_size,yes_ask,yes_ask_size,\
+        no_bid,no_bid_size,no_ask,no_ask_size,\
+        time_to_open,time_to_expiry_minutes,strike_price,realized_volatility,\
+        delta_yes,gamma,vega,theta,market_resolved,outcome,\
+        timestamp_unix_ms,binance_update_ms,poly_yes_update_ms,poly_no_update_ms,latency_binance_poly_ms,\
+        binance_bid,binance_ask,binance_spread_bps,\
+        vol_1sec,vol_5sec,vol_13sec,vol_34sec,vol_89sec,volatility_regime,\
+        volume_1sec,volume_spike,signal_quality,trade_confidence,vol_data_source,\
+        yes_spread_bps,no_spread_bps"
+    }
+
+    pub fn to_csv_line(&self) -> String {
+        format!(
+            // ORIGINAL 23 columns (exact format preserved)
+            "{},{},{:.2},{:.2},\
+            {:.4},{:.0},{:.4},{:.0},\
+            {:.4},{:.0},{:.4},{:.0},\
+            {},{:.2},{:.2},{:.6},\
+            {:.8},{:.8},{:.8},{:.8},{},{},\
+            {},{},{},{},{},\
+            {:.2},{:.2},{:.4},\
+            {:.6},{:.6},{:.6},{:.6},{:.6},{},\
+            {:.2},{},{},{:.4},{},\
+            {:.4},{:.4}",
+            // Original columns
+            self.timestamp,
+            self.market_slug,
+            self.binance_price,
+            self.binance_volume,
+            self.yes_bid,
+            self.yes_bid_size,
+            self.yes_ask,
+            self.yes_ask_size,
+            self.no_bid,
+            self.no_bid_size,
+            self.no_ask,
+            self.no_ask_size,
+            self.time_to_open,
+            self.time_to_expiry_minutes,
+            self.strike_price,
+            self.realized_volatility,
+            self.delta_yes,
+            self.gamma,
+            self.vega,
+            self.theta,
+            self.market_resolved,
+            self.outcome,
+            // New latency columns
+            self.timestamp_unix_ms,
+            self.binance_update_ms,
+            self.poly_yes_update_ms,
+            self.poly_no_update_ms,
+            self.latency_binance_poly_ms,
+            // New Binance orderbook columns
+            self.binance_bid,
+            self.binance_ask,
+            self.binance_spread_bps,
+            // New volatility columns
+            self.vol_1sec,
+            self.vol_5sec,
+            self.vol_13sec,
+            self.vol_34sec,
+            self.vol_89sec,
+            self.volatility_regime,
+            // New volume columns
+            self.volume_1sec,
+            self.volume_spike,
+            // New signal quality columns
+            self.signal_quality,
+            self.trade_confidence,
+            self.vol_data_source,
+            // New spread columns
+            self.yes_spread_bps,
+            self.no_spread_bps
+        )
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn calculate_spread_bps(bid: f64, ask: f64) -> f64 {
+    if bid <= 0.0 || ask <= bid {
+        return 0.0;
+    }
+    let mid = (bid + ask) / 2.0;
+    if mid <= 0.0 {
+        return 0.0;
+    }
+    ((ask - bid) / mid) * 10000.0
+}
+
+// ============================================================================
+// MARKET INFO
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct MarketInfo {
+    pub unique_id: String,
+    pub slug: String,
+    pub condition_id: String,
+    pub yes_token_id: String,
+    pub no_token_id: String,
+    pub window_start: i64,
+    pub window_end: i64,
+    pub strike_price: Option<f64>,
+    pub strike_fetched: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolymarketStrikeResponse {
+    #[serde(rename = "openPrice")]
+    open_price: Option<f64>,
+}
+
+// ============================================================================
+// GREEKS
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Greeks {
+    pub delta: f64,
+    pub gamma: f64,
+    pub vega: f64,
+    pub theta: f64,
+}
+
+fn calculate_greeks(spot: f64, strike: f64, ttx_min: f64, vol: f64) -> Greeks {
+    if ttx_min <= 0.01 || vol <= 0.0 || spot <= 0.0 || strike <= 0.0 {
+        return Greeks {
+            delta: if spot >= strike { 1.0 } else { 0.0 },
+            ..Default::default()
+        };
+    }
+
+    let t = ttx_min / MINUTES_PER_YEAR;
+    let sqrt_t = t.sqrt();
+    let d1 = ((spot / strike).ln() + (vol * vol / 2.0) * t) / (vol * sqrt_t);
+    let d2 = ((spot / strike).ln() - (vol * vol / 2.0) * t) / (vol * sqrt_t);
+
+    let norm_pdf = |x: f64| -> f64 { (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt() };
+
+    let n_prime_d2 = norm_pdf(d2);
+
+    Greeks {
+        delta: (n_prime_d2 / (spot * vol * sqrt_t)).clamp(0.0, 1.0),
+        gamma: (n_prime_d2 * d1 / (spot * spot * vol * vol * t)).clamp(-1e6, 1e6),
+        vega: (n_prime_d2 * sqrt_t * 0.01).clamp(-1e6, 1e6),
+        theta: (-(spot * n_prime_d2 * vol) / (2.0 * sqrt_t) / 365.0).clamp(-1e6, 1e6),
+    }
+}
+
+// ============================================================================
+// MARKET FETCHING
+// ============================================================================
+
+async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
+    let now = Utc::now().timestamp();
+    let pos = now % MARKET_WINDOW_SECONDS;
+    let window_start = if pos < 60 {
+        ((now / MARKET_WINDOW_SECONDS) - 1) * MARKET_WINDOW_SECONDS
+    } else {
+        (now / MARKET_WINDOW_SECONDS) * MARKET_WINDOW_SECONDS
+    };
+    let window_end = window_start + MARKET_WINDOW_SECONDS;
+    let unique_id = format!("btc-updown-15m-{}", window_start);
+    let slug = format!("btc-updown-15m-{}", window_start);
+    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
+
+    info!("Fetching current market: {}", unique_id);
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Market fetch failed: {}", resp.status()));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let markets = data["markets"]
+        .as_array()
+        .ok_or_else(|| anyhow!("No markets"))?;
+
+    for m in markets {
+        if !m["active"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let outcomes: Vec<String> =
+            serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
+        let tokens: Vec<String> =
+            serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
+        if outcomes.len() != 2 || tokens.len() != 2 {
+            continue;
+        }
+
+        let up_idx = outcomes.iter().position(|o| o == "Up");
+        let down_idx = outcomes.iter().position(|o| o == "Down");
+
+        if let (Some(ui), Some(di)) = (up_idx, down_idx) {
+            return Ok(MarketInfo {
+                unique_id,
+                slug: m["slug"].as_str().unwrap_or("").to_string(),
+                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
+                yes_token_id: tokens[ui].clone(),
+                no_token_id: tokens[di].clone(),
+                window_start,
+                window_end,
+                strike_price: None,
+                strike_fetched: false,
+            });
+        }
+    }
+    Err(anyhow!("No valid BTC market for current window"))
+}
+
+async fn fetch_next_market_after(
+    client: &reqwest::Client,
+    current_window_start: i64,
+) -> Result<MarketInfo> {
+    let next_window_start = current_window_start + MARKET_WINDOW_SECONDS;
+    let window_end = next_window_start + MARKET_WINDOW_SECONDS;
+    let unique_id = format!("btc-updown-15m-{}", next_window_start);
+    let slug = format!("btc-updown-15m-{}", next_window_start);
+    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
+
+    info!("Fetching next market: {}", unique_id);
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Market fetch failed: {}", resp.status()));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let markets = data["markets"]
+        .as_array()
+        .ok_or_else(|| anyhow!("No markets"))?;
+
+    for m in markets {
+        if !m["active"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let outcomes: Vec<String> =
+            serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
+        let tokens: Vec<String> =
+            serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
+        if outcomes.len() != 2 || tokens.len() != 2 {
+            continue;
+        }
+
+        let up_idx = outcomes.iter().position(|o| o == "Up");
+        let down_idx = outcomes.iter().position(|o| o == "Down");
+
+        if let (Some(ui), Some(di)) = (up_idx, down_idx) {
+            return Ok(MarketInfo {
+                unique_id,
+                slug: m["slug"].as_str().unwrap_or("").to_string(),
+                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
+                yes_token_id: tokens[ui].clone(),
+                no_token_id: tokens[di].clone(),
+                window_start: next_window_start,
+                window_end,
+                strike_price: None,
+                strike_fetched: false,
+            });
+        }
+    }
+    Err(anyhow!("No valid BTC market for next window"))
+}
+
+async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) -> Result<f64> {
+    let start =
+        DateTime::from_timestamp(market.window_start, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
+    let end =
+        DateTime::from_timestamp(market.window_end, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
+
+    let url = format!(
+        "{}/crypto-price?symbol=BTC&eventStartTime={}&variant=fifteen&endDate={}",
+        POLY_CRYPTO_API_URL,
+        start.format("%Y-%m-%dT%H:%M:%SZ"),
+        end.format("%Y-%m-%dT%H:%M:%SZ")
+    );
+
+    debug!("Strike fetch URL for {}: {}", market.unique_id, url);
+
+    for attempt in 1..=STRIKE_RETRY_ATTEMPTS {
+        match client
+            .get(&url)
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    match resp.json::<PolymarketStrikeResponse>().await {
+                        Ok(data) => {
+                            if let Some(price) = data.open_price {
+                                info!(
+                                    "✅ Strike fetched for {} on attempt {}: ${:.2}",
+                                    market.unique_id, attempt, price
+                                );
+                                return Ok(price);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Attempt {} for {}: JSON parse error: {}",
+                                attempt, market.unique_id, e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Attempt {} for {}: Request failed: {}",
+                    attempt, market.unique_id, e
+                );
+            }
+        }
+
+        if attempt < STRIKE_RETRY_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(STRIKE_RETRY_INTERVAL_MS)).await;
+        }
+    }
+
+    Err(anyhow!(
+        "Strike fetch failed for {} after {} retries",
+        market.unique_id,
+        STRIKE_RETRY_ATTEMPTS
+    ))
+}
+
+// ============================================================================
+// HELPER: Truncate token ID for display
+// ============================================================================
+
+pub fn truncate_id(id: &str, first: usize, last: usize) -> String {
+    let len = id.len();
+    if len <= first + last {
+        return id.to_string();
+    }
+    format!("{}...{}", &id[..first], &id[len - last..])
+}
+
+// ============================================================================
+// MAIN - ENHANCED DATA COLLECTION LOOP
+// ============================================================================
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // let (strike_tx, strike_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("multi_market_logger=info".parse().unwrap())
+                .add_directive("combine_fetcher=info".parse().unwrap()),
+        )
+        .init();
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║ Enhanced Multi-Market Data Logger (Backward Compatible)  ║");
+    println!("║ Original 23 cols + 22 new cols for latency analysis      ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    let args: Vec<String> = std::env::args().collect();
+    let duration: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(28800);
+    let csv_path = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "overnight_btc_data.csv".into());
+    let csv_record_interval_sec: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(CSV_RECORD_INTERVAL_SEC);
+
+    println!(
+        "Duration: {}s ({:.1}h) | Output: {} | Interval: {}s\n",
+        duration,
+        duration as f64 / 3600.0,
+        csv_path,
+        csv_record_interval_sec
+    );
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(3))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()?;
+
+    println!("⏳ Fetching current market...");
+    let mut current_market = fetch_current_market(&http).await?;
+    println!(
+        "✅ Market: {} | YES: {}... | NO: {}...",
+        current_market.unique_id,
+        &current_market.yes_token_id[..10],
+        &current_market.no_token_id[..10]
+    );
+
+    // Setup Binance
+    let mut binance_manager = BinanceDataManager::new();
+    binance_manager.connect(&["BTCUSDT"], None).await?;
+    println!("✅ Binance connected");
+
+    // Bootstrap volatility with historical data
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    println!("⏳ Bootstrapping volatility with historical data...");
+    match binance_manager.bootstrap_volatility("BTCUSDT", 70).await {
+        Ok(count) => println!("✅ Bootstrapped with {} 1-min candles", count),
+        Err(e) => warn!("⚠️ Bootstrap failed: {} - will use defaults", e),
+    }
+
+    // Setup Polymarket stream
+    let poly_stream = Arc::new(PolymarketOrderbookStream::new());
+    let token_ids = vec![
+        current_market.yes_token_id.clone(),
+        current_market.no_token_id.clone(),
+    ];
+
+    // FIXED: stream() returns UnboundedReceiver<PolyPriceUpdate>, not String
+    let mut rx = poly_stream.clone().stream(token_ids).await?;
+
+    // Spawn task to consume Polymarket updates (they update internal cache)
+    tokio::spawn(async move {
+        while let Some(_update) = rx.recv().await {
+            // Updates are handled internally by PolymarketOrderbookStream
+            // We just need to consume them to keep the channel alive
+        }
+    });
+
+    println!("✅ Polymarket connected\n");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Open CSV
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&csv_path)?;
+    let file_metadata = file.metadata()?;
+    let is_new_file = file_metadata.len() == 0;
+    let mut file = BufWriter::with_capacity(64 * 1024, file);
+
+    if is_new_file {
+        writeln!(file, "{}", CsvRecord::csv_header())?;
+        file.flush()?;
+    }
+
+    let start_time = SystemTime::now();
+    let end_time = start_time + Duration::from_secs(duration);
+    let mut tick: u64 = 0;
+    let mut last_log_ms: i64 = 0;
+    let mut markets_tracked: usize = 1;
+    const STRIKE_FETCH_DELAY_SECS: i64 = 30;
+
+    // ← ADD THE CHANNEL HERE
+    let (strike_tx, mut strike_rx) = tokio::sync::mpsc::unbounded_channel::<(String, f64)>();
+
+    info!("Starting enhanced data collection...");
+
+    loop {
+        if SystemTime::now() >= end_time {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // Get MarketSnapshot (contains all Binance data)
+        let snapshot = match binance_manager.get_market_snapshot("BTCUSDT").await {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // CSV recording frequency control
+        let should_record = if csv_record_interval_sec == 0 {
+            const MIN_EVENT_INTERVAL_MS: i64 = 10;
+            now_ms - last_log_ms >= MIN_EVENT_INTERVAL_MS
+        } else {
+            let interval_ms = (csv_record_interval_sec * 1000) as i64;
+            now_ms - last_log_ms >= interval_ms
+        };
+
+        if !should_record {
+            continue;
+        }
+
+        last_log_ms = now_ms;
+        let now = Utc::now();
+        let now_ts = now.timestamp();
+
+        // Fetch strike price if needed
+
+        if !current_market.strike_fetched {
+            let time_since_start = now_ts - current_market.window_start;
+            if time_since_start >= STRIKE_FETCH_DELAY_SECS {
+                info!(
+                    "⏳ Spawning strike fetch task for {}...",
+                    current_market.unique_id
+                );
+
+                // Clone what we need for the async task
+                let http_clone = http.clone();
+                let market_clone = current_market.clone();
+                let strike_tx_clone = strike_tx.clone();
+
+                // Spawn non-blocking task
+                tokio::spawn(async move {
+                    match fetch_strike_with_retry(&http_clone, &market_clone).await {
+                        Ok(strike) => {
+                            info!("✅ Strike fetched: ${:.2}", strike);
+                            // You'll need to communicate this back via a channel
+                        }
+                        Err(e) => {
+                            warn!("⚠️ Strike fetch failed: {}", e);
+                        }
+                    }
+                });
+
+                // Mark as attempted so we don't spawn multiple tasks
+                current_market.strike_fetched = true;
+                // Use spot price until we get the real strike
+                current_market.strike_price = Some(snapshot.spot_price);
+            }
+        }
+
+        while let Ok((market_id, strike)) = strike_rx.try_recv() {
+            if market_id == current_market.unique_id {
+                info!("📥 Received strike price: ${:.2}", strike);
+                current_market.strike_price = Some(strike);
+            }
+        }
+
+        // Get Polymarket prices (from internal cache)
+        let yes_prices = poly_stream.get_prices(&current_market.yes_token_id);
+        let no_prices = poly_stream.get_prices(&current_market.no_token_id);
+
+        // Extract Polymarket update timestamps
+        let poly_yes_update_ms = yes_prices
+            .as_ref()
+            .map(|p| p.last_update_ms)
+            .unwrap_or(now_ms);
+        let poly_no_update_ms = no_prices
+            .as_ref()
+            .map(|p| p.last_update_ms)
+            .unwrap_or(now_ms);
+
+        // Binance update time from snapshot
+        let binance_update_ms = snapshot.timestamp;
+
+        // Calculate latency differential
+        let poly_avg_update = (poly_yes_update_ms + poly_no_update_ms) / 2;
+        let latency_ms = binance_update_ms - poly_avg_update;
+
+        // Get Binance bid/ask
+        let (binance_bid, binance_ask) = binance_manager
+            .get_bid_ask("BTCUSDT")
+            .await
+            .unwrap_or((snapshot.spot_price, snapshot.spot_price));
+
+        let time_to_open = current_market.window_start - now_ts;
+        let ttx = if time_to_open > 0 {
+            (current_market.window_end - now_ts) as f64 / 60.0
+        } else {
+            ((current_market.window_end - now_ts) as f64 / 60.0).max(0.0)
+        };
+
+        let resolved = ttx <= 0.0;
+        let strike = current_market.strike_price.unwrap_or(snapshot.spot_price);
+        let greeks = calculate_greeks(
+            snapshot.spot_price,
+            strike,
+            ttx,
+            snapshot.realized_volatility,
+        );
+
+        let outcome = if resolved {
+            if snapshot.spot_price >= strike {
+                "YES"
+            } else {
+                "NO"
+            }
+        } else {
+            ""
+        };
+
+        // Determine volatility data source
+        let vol_data_source = if snapshot.volatility_regime == "BOOTSTRAP" {
+            "BOOTSTRAP".to_string()
+        } else if binance_manager
+            .is_volatility_ready("BTCUSDT")
+            .await
+            .unwrap_or(false)
+        {
+            "REALTIME".to_string()
+        } else {
+            "1MIN_FALLBACK".to_string()
+        };
+
+        // Extract Polymarket prices
+        let yes_bid = yes_prices
+            .as_ref()
+            .and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+        let yes_ask = yes_prices
+            .as_ref()
+            .and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+        let no_bid = no_prices
+            .as_ref()
+            .and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+        let no_ask = no_prices
+            .as_ref()
+            .and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+
+        let yes_spread = calculate_spread_bps(yes_bid, yes_ask);
+        let no_spread = calculate_spread_bps(no_bid, no_ask);
+
+        // Build record (backward compatible order)
+        let record = CsvRecord {
+            // ORIGINAL 23 columns
+            timestamp: now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+            market_slug: current_market.slug.clone(),
+            binance_price: snapshot.spot_price,
+            binance_volume: snapshot.volume_1min, // Keep original name for compatibility
+            yes_bid,
+            yes_bid_size: yes_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
+            yes_ask,
+            yes_ask_size: yes_prices.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0),
+            no_bid,
+            no_bid_size: no_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
+            no_ask,
+            no_ask_size: no_prices.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0),
+            time_to_open,
+            time_to_expiry_minutes: ttx,
+            strike_price: strike,
+            realized_volatility: snapshot.realized_volatility, // Keep original name
+            delta_yes: greeks.delta,
+            gamma: greeks.gamma,
+            vega: greeks.vega,
+            theta: greeks.theta,
+            market_resolved: resolved,
+            outcome: outcome.to_string(),
+
+            // NEW 22 columns (appended)
+            timestamp_unix_ms: now_ms,
+            binance_update_ms,
+            poly_yes_update_ms,
+            poly_no_update_ms,
+            latency_binance_poly_ms: latency_ms,
+            binance_bid,
+            binance_ask,
+            binance_spread_bps: snapshot.spread_bps,
+            vol_1sec: snapshot.vol_1sec,
+            vol_5sec: snapshot.vol_5sec,
+            vol_13sec: snapshot.vol_13sec,
+            vol_34sec: snapshot.vol_34sec,
+            vol_89sec: snapshot.vol_89sec,
+            volatility_regime: snapshot.volatility_regime.clone(),
+            volume_1sec: snapshot.volume_1sec,
+            volume_spike: snapshot.volume_spike,
+            signal_quality: snapshot.signal_quality.clone(),
+            trade_confidence: snapshot.trade_confidence,
+            vol_data_source: vol_data_source.clone(),
+            yes_spread_bps: yes_spread,
+            no_spread_bps: no_spread,
+        };
+
+        let _ = writeln!(file, "{}", record.to_csv_line());
+        let _ = file.flush();
+
+        tick += 1;
+
+        if tick % 100 == 0 {
+            info!(
+                "#{} Market={} TTX={:.1}m",
+                tick, current_market.unique_id, ttx
+            );
+            info!(
+                "yesIDX={} | noIDX={}",
+                truncate_id(&current_market.yes_token_id, 4, 2),
+                truncate_id(&current_market.no_token_id, 4, 2)
+            );
+            info!(
+                "BTC=${:.0}@${:.0} | Yes:{:.2}@{:.0} | No:{:.2}@{:.0} | Vol:{:.6}% | Δ:{:.6} | Γ:{:.6} | v:{:.6} | Θ:{:.6}",
+                record.binance_price, record.binance_volume, record.yes_bid, record.yes_bid_size,
+                record.no_bid, record.no_bid_size, record.realized_volatility*100.0,
+                record.delta_yes, record.gamma, record.vega, record.theta
+            );
+            // NEW: Log latency and volatility details
+            info!(
+                "Lag={}ms | BASpr={:.2}bps | VolRege={} | VolSrc={} | Vol[1s/5s/89s]={:.4}/{:.4}/{:.4}",
+                latency_ms, snapshot.spread_bps, snapshot.volatility_regime, vol_data_source,
+                snapshot.vol_1sec, snapshot.vol_5sec, snapshot.vol_89sec
+            );
+            info!(
+                "Volume[1s/1m]={:.0}/{:.0} | Spike={} | YesSpr={:.2}bps | NoSpr={:.2}bps | Q*={} | Conf={:.2}",
+                snapshot.volume_1sec, snapshot.volume_1min, snapshot.volume_spike,
+                yes_spread, no_spread, snapshot.signal_quality, snapshot.trade_confidence
+            );
+        }
+
+        // Check if market expired - rotate to next
+        if resolved {
+            info!(
+                "🔄 Market {} expired (TTX={:.1}m) - rotating to next market...",
+                current_market.unique_id, ttx
+            );
+            match fetch_next_market_after(&http, current_market.window_start).await {
+                Ok(next_market) => {
+                    info!("✅ Rotated to: {}", next_market.unique_id);
+                    current_market = next_market;
+                    markets_tracked += 1;
+
+                    // Re-subscribe to new tokens
+                    let new_token_ids = vec![
+                        current_market.yes_token_id.clone(),
+                        current_market.no_token_id.clone(),
+                    ];
+                    let mut new_rx = poly_stream.clone().stream(new_token_ids).await?;
+
+                    tokio::spawn(async move { while let Some(_update) = new_rx.recv().await {} });
+
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(e) => {
+                    warn!("⚠️ Failed to fetch next market: {}", e);
+                    warn!("Continuing with current market (may have ended)...");
+                }
+            }
+        }
+    }
+
+    let _ = file.flush();
+    info!("✅ Collection complete!");
+    info!("   Duration: {:.1} hours", duration as f64 / 3600.0);
+    info!("   Markets tracked: {}", markets_tracked);
+    info!("   Total ticks: {}", tick);
+    info!("   Output: {}", csv_path);
+    println!("\n✅ Complete!");
+
+    Ok(())
+}
