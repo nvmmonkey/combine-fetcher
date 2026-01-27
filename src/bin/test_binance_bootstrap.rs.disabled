@@ -100,25 +100,25 @@ pub struct CsvRecord {
 
 impl CsvRecord {
     pub fn csv_header() -> &\\'static str {
-        "timestamp_utc,timestamp_unix_ms,binance_update_ms,poly_yes_update_ms,poly_no_update_ms,latency_binance_poly_ms,\\
-        market_slug,time_to_open,time_to_expiry_minutes,strike_price,market_resolved,outcome,\\
-        binance_price,binance_bid,binance_ask,binance_spread_bps,\\
-        vol_1sec,vol_5sec,vol_13sec,vol_34sec,vol_89sec,vol_blended,volatility_regime,\\
-        volume_1sec,volume_1min,volume_spike,signal_quality,trade_confidence,vol_data_source,\\
-        yes_bid,yes_bid_size,yes_ask,yes_ask_size,yes_spread_bps,\\
-        no_bid,no_bid_size,no_ask,no_ask_size,no_spread_bps,\\
+        "timestamp_utc,timestamp_unix_ms,binance_update_ms,poly_yes_update_ms,poly_no_update_ms,latency_binance_poly_ms,\
+        market_slug,time_to_open,time_to_expiry_minutes,strike_price,market_resolved,outcome,\
+        binance_price,binance_bid,binance_ask,binance_spread_bps,\
+        vol_1sec,vol_5sec,vol_13sec,vol_34sec,vol_89sec,vol_blended,volatility_regime,\
+        volume_1sec,volume_1min,volume_spike,signal_quality,trade_confidence,vol_data_source,\
+        yes_bid,yes_bid_size,yes_ask,yes_ask_size,yes_spread_bps,\
+        no_bid,no_bid_size,no_ask,no_ask_size,no_spread_bps,\
         delta_yes,gamma,vega,theta"
     }
     
     pub fn to_csv_line(&self) -> String {
         format!(
-            "{},{},{},{},{},{},\\
-            {},{},{:.2},{:.2},{},{},\\
-            {:.2},{:.2},{:.2},{:.4},\\
-            {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},\\
-            {:.2},{:.2},{},{},{:.4},{},\\
-            {:.4},{:.0},{:.4},{:.0},{:.4},\\
-            {:.4},{:.0},{:.4},{:.0},{:.4},\\
+            "{},{},{},{},{},{},\
+            {},{},{:.2},{:.2},{},{},\
+            {:.2},{:.2},{:.2},{:.4},\
+            {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},\
+            {:.2},{:.2},{},{},{:.4},{},\
+            {:.4},{:.0},{:.4},{:.0},{:.4},\
+            {:.4},{:.0},{:.4},{:.0},{:.4},\
             {:.8},{:.8},{:.8},{:.8}",
             // Timestamps
             self.timestamp_utc, self.timestamp_unix_ms, self.binance_update_ms,
@@ -414,40 +414,3 @@ async fn main() -> Result<()> {
     
     Ok(())
 }
-''')
-
-print("✅ Complete fixed file written to: /tmp/multi_market_logger_FIXED.rs")
-print("\n" + "=" * 80)
-print("ADDITIONAL REQUIRED CHANGES TO OTHER FILES")
-print("=" * 80)
-
-requirements = '''
-1. binance.rs - Add method to get bid/ask separately:
-   
-   pub async fn get_bid_ask(&self, symbol: &str) -> Option<(f64, f64)> {
-       let prices = self.prices.read().await;
-       prices.get(&symbol.to_uppercase()).map(|p| (
-           p.bid.to_f64().unwrap_or(0.0),
-           p.ask.to_f64().unwrap_or(0.0)
-       ))
-   }
-
-2. polymarket.rs - Add last_update_ms field to TokenPrices:
-   
-   pub struct TokenPrices {
-       pub best_bid: Option<Decimal>,
-       pub best_ask: Option<Decimal>,
-       pub best_bid_size: f64,
-       pub best_ask_size: f64,
-       pub last_update_ms: i64,  // <-- ADD THIS
-   }
-   
-   // Update whenever orderbook updates:
-   self.last_update_ms = SystemTime::now()
-       .duration_since(UNIX_EPOCH)
-       .unwrap()
-       .as_millis() as i64;
-'''
-
-print(requirements)
-print("=" * 80)

@@ -16,9 +16,9 @@ path = "src/main.rs"
 name = "multi_market_logger"
 path = "src/bin/multi_market_logger.rs"
 
-[[bin]]
-name = "test_binance_bootstrap"
-path = "src/bin/test_binance_bootstrap.rs"
+# [[bin]]
+# name = "test_binance_bootstrap"
+# path = "src/bin/test_binance_bootstrap.rs"
 
 [dependencies]
 # Polymarket SDK (local vendor path)

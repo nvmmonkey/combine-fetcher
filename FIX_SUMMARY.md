@@ -270,6 +270,7 @@ Expected: 26 passed tests (volatility calculator, volume tracker, bootstrap)
 | 2026-01-26 | FIX8 | Code quality refactoring |
 | 2026-01-26 | FIX9 | Fixed market rotation race condition, added cooldown and max retry limit, infinite strike retry |
 | 2026-01-26 | FIX10 | Documentation consolidation |
+| 2026-01-27 | FIX11 | Fixed strike price to use blocking fetch before logging starts, ensuring data consistency with main.rs pattern |
 
 ---
 
