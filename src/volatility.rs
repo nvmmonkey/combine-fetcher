@@ -176,7 +176,7 @@ impl FibonacciVolatilityCalculator {
             min_price_change_bps: 0.1, // 0.1 bps = 0.0001% (ultra-sensitive to capture micro-movements)
 
             // Staleness threshold
-            stale_threshold_ms: 60000, // 60 seconds without updates = stale
+            stale_threshold_ms: 3000, // 3 seconds without updates = stale
 
             // Corrected annualization factors
             annualization_1sec: (SECONDS_PER_YEAR / 1.0).sqrt(), // ≈ 5,617
@@ -887,7 +887,7 @@ mod tests {
         assert!(!calc.has_realtime_data());
         assert_eq!(calc.fib_weights, [1.0, 2.0, 3.0, 5.0, 8.0]);
         assert_eq!(calc.min_price_change_bps, 0.1);
-        assert_eq!(calc.stale_threshold_ms, 60000);
+        assert_eq!(calc.stale_threshold_ms, 3000);
     }
 
     #[test]
