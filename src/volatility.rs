@@ -167,16 +167,16 @@ impl FibonacciVolatilityCalculator {
             price_buffer_1min: VecDeque::with_capacity(120),
             window_minutes: 60,
             min_samples_fast: 3,     // Fast vol needs 3+ price changes
-            min_samples_realtime: 3, // Standard windows need 5+ samples
+            min_samples_realtime: 5, // Standard windows need 5+ samples
             min_samples_1min: 10,    // 1-min needs 10+ candles
             default_volatility: default_vol,
 
             // Deduplication settings (NO time-based rate limiting)
             last_accepted_price: 0.0,
-            min_price_change_bps: 0.1, // 0.1 bps = 0.001% (very sensitive for arb)
+            min_price_change_bps: 0.1, // 0.1 bps = 0.0001% (ultra-sensitive to capture micro-movements)
 
             // Staleness threshold
-            stale_threshold_ms: 3000, // 3 seconds without updates = stale
+            stale_threshold_ms: 60000, // 60 seconds without updates = stale
 
             // Corrected annualization factors
             annualization_1sec: (SECONDS_PER_YEAR / 1.0).sqrt(), // ≈ 5,617
@@ -216,29 +216,74 @@ impl FibonacciVolatilityCalculator {
     /// - NO artificial delays (preserves sub-second reaction time)
     ///
     /// Called by WebSocket handler for each bookTicker update.
+    /// Add real-time price tick with improved deduplication
     pub fn add_price(&mut self, timestamp: i64, price: f64) {
         if price <= 0.0 {
             return;
         }
 
-        // ONLY filter duplicate prices (deduplication)
-        // NO time-based rate limiting for latency arbitrage
+        // Improved deduplication: accept if meaningful change OR 60+ seconds passed
         if self.last_accepted_price > 0.0 {
             let price_change_bps =
                 ((price - self.last_accepted_price).abs() / self.last_accepted_price) * 10000.0;
 
-            if price_change_bps < self.min_price_change_bps {
-                return; // Duplicate price, skip
+            let time_since_last = self
+                .price_buffer_unified
+                .back()
+                .map_or(i64::MAX, |last| timestamp - last.timestamp);
+
+            // Accept if: meaningful change OR 60+ seconds passed (fixes sparse ticks)
+            if price_change_bps < self.min_price_change_bps && time_since_last < 60_000 {
+                return; // Skip duplicate
             }
         }
 
-        // Accept immediately - preserves arbitrage edge
+        // Accept tick
         self.price_buffer_unified
             .push_back(PriceTick { timestamp, price });
         self.last_accepted_price = price;
 
-        // Cleanup: Keep only last 90 seconds of ticks
-        let cutoff = timestamp - 90_000;
+        // Cleanup: Keep only last 90 minutes (not seconds)
+        let cutoff = timestamp - 90 * 60_000; // CHANGED: 90 minutes
+        while let Some(oldest) = self.price_buffer_unified.front() {
+            if oldest.timestamp < cutoff {
+                self.price_buffer_unified.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// NEW: Sync 1-min rolling data into real-time buffer for accurate volatility
+    /// Call this every ~60 seconds from your main loop
+    pub fn sync_1min_to_realtime(&mut self, current_time: i64) {
+        // Take most recent 1-min candle and add to real-time buffer
+        if let Some(&last_1min_price) = self.price_buffer_1min.back() {
+            let minute_timestamp = (current_time / 60_000) * 60_000; // Snap to minute
+
+            // Only add if it's a new minute bucket
+            let should_add = self.price_buffer_unified.back().map_or(true, |last_tick| {
+                let last_minute = (last_tick.timestamp / 60_000) * 60_000;
+                minute_timestamp > last_minute
+            });
+
+            if should_add {
+                self.price_buffer_unified.push_back(PriceTick {
+                    timestamp: minute_timestamp,
+                    price: last_1min_price,
+                });
+
+                tracing::debug!(
+                    "{} synced 1-min price {:.2} to realtime buffer (buffer_size={})",
+                    self.symbol,
+                    last_1min_price,
+                    self.price_buffer_unified.len()
+                );
+            }
+        }
+
+        // Cleanup old data (90 minutes)
+        let cutoff = current_time - 90 * 60_000;
         while let Some(oldest) = self.price_buffer_unified.front() {
             if oldest.timestamp < cutoff {
                 self.price_buffer_unified.pop_front();
@@ -289,15 +334,15 @@ impl FibonacciVolatilityCalculator {
         self.price_buffer_unified.len() >= self.min_samples_fast
     }
 
-    /// Check if real-time data is stale (no recent updates)
+    /// Check if real-time data is stale (>2 minutes without updates)
     pub fn is_realtime_stale(&self, current_time: i64) -> bool {
         if self.price_buffer_unified.is_empty() {
             return true;
         }
 
-        // Check if most recent sample is older than threshold
+        // CHANGED: 2 minutes instead of 3 seconds (fits 1-min granularity)
         if let Some(latest) = self.price_buffer_unified.back() {
-            return (current_time - latest.timestamp) > self.stale_threshold_ms;
+            return (current_time - latest.timestamp) > 120_000; // 2 minutes
         }
 
         true
@@ -443,6 +488,10 @@ impl FibonacciVolatilityCalculator {
     /// ## Fast Volatility
     /// - Also calculates fast volatility (5s window, 3+ samples) for arbitrage decisions
     /// - Available via get_fast_volatility()
+    /// Calculate all Fibonacci timeframes with 1-min sync fallback
+    ///
+    /// AUTO-SYNC: Automatically feeds 1-min data into real-time buffer when stale
+    /// All existing logic preserved + sparse tick fix
     pub fn calculate_all(&mut self, current_time: i64) -> (f64, f64, f64, f64, f64, f64) {
         // Check cache validity (500ms TTL)
         if current_time - self.cache_timestamp < self.cache_ttl_ms {
@@ -456,13 +505,24 @@ impl FibonacciVolatilityCalculator {
             );
         }
 
+        // NEW: Auto-sync 1-min data into real-time buffer if stale
+        // This fixes sparse millisecond ticks automatically
+        if self.is_realtime_stale(current_time) {
+            tracing::debug!(
+                "{} auto-syncing 1-min data to realtime (stale={}, realtime_size={})",
+                self.symbol,
+                self.is_realtime_stale(current_time),
+                self.price_buffer_unified.len()
+            );
+            self.sync_1min_to_realtime(current_time);
+        }
+
         // Calculate 1-min volatility first (used as fallback)
         let vol_1min_raw = self.calculate_vol_from_1min_buffer();
         self.cached_vol_1min = vol_1min_raw.unwrap_or(self.default_volatility);
 
-        // Debug: Log the actual 1-min volatility calculation
         tracing::debug!(
-            "{} 1min_vol: raw={:?} -> cached={:.4} (buffer_size={}, default={})",
+            "{} 1min_vol: raw={:?} -> cached={:.4} (buffer_size={}, default={:.2})",
             self.symbol,
             vol_1min_raw,
             self.cached_vol_1min,
@@ -470,17 +530,12 @@ impl FibonacciVolatilityCalculator {
             self.default_volatility
         );
 
-        // Minimum volatility threshold - if real-time vol is below this,
-        // it likely means prices are stale/identical even after deduplication.
-        // Lowered from 5% to 2% since we now have deduplication.
         const MIN_REALTIME_VOL_THRESHOLD: f64 = 0.02; // 2% annualized
 
-        // Helper to use real-time vol or fall back to 1-min if too low
         let get_vol_with_fallback = |realtime_vol: Option<f64>, fallback: f64| -> f64 {
             match realtime_vol {
                 Some(v) if v >= MIN_REALTIME_VOL_THRESHOLD => v,
                 Some(v) => {
-                    // Real-time vol is suspiciously low (stale prices), use fallback
                     tracing::trace!(
                         "{} real-time vol {:.4} below threshold {:.4}, using fallback {:.4}",
                         self.symbol,
@@ -494,8 +549,7 @@ impl FibonacciVolatilityCalculator {
             }
         };
 
-        // Calculate FAST volatility estimate (for arbitrage decisions)
-        // 5-second window, requires minimum 3 price changes
+        // Calculate FAST volatility estimate (5s window, 3+ samples)
         let fast_vol_raw = self.calculate_vol_from_realtime_window(
             5_000,
             self.annualization_1sec,
@@ -503,17 +557,13 @@ impl FibonacciVolatilityCalculator {
             self.min_samples_fast,
         );
 
-        // Determine if real-time data is usable
         let is_stale = self.is_realtime_stale(current_time);
         let use_realtime = fast_vol_raw.is_some() && !is_stale;
 
         if use_realtime {
-            // Have fresh real-time data - use it with fallback for low vol
             self.cached_vol_fast = get_vol_with_fallback(fast_vol_raw, self.cached_vol_1min);
 
-            // Calculate full Fibonacci windows with adaptive sample requirements
-            self.cached_vol_1sec = self.cached_vol_fast; // Reuse fast vol for 1sec
-
+            self.cached_vol_1sec = self.cached_vol_fast;
             self.cached_vol_5sec = get_vol_with_fallback(
                 self.calculate_vol_from_realtime_window(
                     10_000,
@@ -523,7 +573,6 @@ impl FibonacciVolatilityCalculator {
                 ),
                 self.cached_vol_1min,
             );
-
             self.cached_vol_13sec = get_vol_with_fallback(
                 self.calculate_vol_from_realtime_window(
                     20_000,
@@ -533,7 +582,6 @@ impl FibonacciVolatilityCalculator {
                 ),
                 self.cached_vol_5sec,
             );
-
             self.cached_vol_34sec = get_vol_with_fallback(
                 self.calculate_vol_from_realtime_window(
                     45_000,
@@ -543,7 +591,6 @@ impl FibonacciVolatilityCalculator {
                 ),
                 self.cached_vol_13sec,
             );
-
             self.cached_vol_89sec = get_vol_with_fallback(
                 self.calculate_vol_from_realtime_window(
                     90_000,
@@ -565,7 +612,6 @@ impl FibonacciVolatilityCalculator {
             self.cached_vol_89sec
         );
         } else {
-            // Fall back to 1-min volatility for all timeframes
             tracing::debug!(
                 "{} using 1-min fallback (stale={}, fast_vol={:?}, buffer_size={})",
                 self.symbol,
@@ -841,7 +887,7 @@ mod tests {
         assert!(!calc.has_realtime_data());
         assert_eq!(calc.fib_weights, [1.0, 2.0, 3.0, 5.0, 8.0]);
         assert_eq!(calc.min_price_change_bps, 0.1);
-        assert_eq!(calc.stale_threshold_ms, 3000);
+        assert_eq!(calc.stale_threshold_ms, 60000);
     }
 
     #[test]

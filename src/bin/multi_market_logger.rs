@@ -18,7 +18,7 @@ use combine_fetcher::api::binance::BinanceDataManager;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
 use combine_fetcher::{
     CSV_RECORD_INTERVAL_SEC, GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
-    MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_ATTEMPTS, STRIKE_RETRY_INTERVAL_MS,
+    MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_INTERVAL_MS,
 };
 
 // ============================================================================
@@ -380,9 +380,12 @@ async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) 
 
     debug!("Strike fetch URL for {}: {}", market.unique_id, url);
 
-    // Bounded retry loop
-    for attempt in 1..=STRIKE_RETRY_ATTEMPTS {
-        debug!("Attempting strike fetch (attempt {}/{})", attempt, STRIKE_RETRY_ATTEMPTS);
+    // Infinite retry with exponential backoff - keep trying until success
+    let mut attempt = 1u64;
+    let mut backoff_ms = STRIKE_RETRY_INTERVAL_MS;
+
+    loop {
+        debug!("Attempting strike fetch (attempt {}) for {}", attempt, market.unique_id);
 
         match client
             .get(&url)
@@ -419,12 +422,16 @@ async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) 
             }
         }
 
-        if attempt < STRIKE_RETRY_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(STRIKE_RETRY_INTERVAL_MS)).await;
-        }
-    }
+        // Exponential backoff: 500ms -> 1s -> 2s -> 4s -> ... (max 30s)
+        info!(
+            "⏳ Strike fetch not yet available, retrying in {}ms... (attempt {})",
+            backoff_ms, attempt
+        );
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
 
-    Err(anyhow!("Strike fetch failed after {} retries", STRIKE_RETRY_ATTEMPTS))
+        backoff_ms = (backoff_ms * 2).min(5000); // Cap at 5 seconds
+        attempt += 1;
+    }
 }
 
 // ============================================================================
@@ -507,20 +514,14 @@ async fn main() -> Result<()> {
         Err(e) => warn!("⚠️ Bootstrap failed: {} - will use defaults", e),
     }
 
-    // Fetch strike with retry BEFORE starting data collection
+    // Fetch strike with infinite retry BEFORE starting data collection
+    // Will keep retrying until successful - no fallback to 0.0
     println!("⏳ Fetching strike price for {}...", current_market.unique_id);
-    match fetch_strike_with_retry(&http, &current_market).await {
-        Ok(s) => {
-            current_market.strike_price = Some(s);
-            println!("✅ Strike price: ${:.2}", s);
-        }
-        Err(e) => {
-            warn!("⚠️ Strike fetch failed: {} - Using fallback value 0.0", e);
-            current_market.strike_price = Some(0.0);
-            println!("⚠️  Fallback: strike_price set to 0.0");
-        }
-    }
+    println!("ℹ️  NOTE: Will retry indefinitely until strike price is available (exponential backoff, max 30s)");
+    let strike = fetch_strike_with_retry(&http, &current_market).await?;
+    current_market.strike_price = Some(strike);
     current_market.strike_fetched = true;
+    println!("✅ Strike price: ${:.2} - ready to start logging", strike);
 
     // Setup Polymarket stream
     let poly_stream = Arc::new(PolymarketOrderbookStream::new());
@@ -806,20 +807,12 @@ async fn main() -> Result<()> {
                         // Reset failure counter on successful rotation
                         consecutive_fetch_failures = 0;
 
-                        // Fetch strike for the new market
+                        // Fetch strike for the new market (infinite retry, no fallback)
                         println!("⏳ Fetching strike price for {}...", current_market.unique_id);
-                        match fetch_strike_with_retry(&http, &current_market).await {
-                            Ok(s) => {
-                                current_market.strike_price = Some(s);
-                                println!("✅ Strike price: ${:.2}", s);
-                            }
-                            Err(e) => {
-                                warn!("⚠️ Strike fetch failed: {} - Using fallback value 0.0", e);
-                                current_market.strike_price = Some(0.0);
-                                println!("⚠️  Fallback: strike_price set to 0.0");
-                            }
-                        }
+                        let strike = fetch_strike_with_retry(&http, &current_market).await?;
+                        current_market.strike_price = Some(strike);
                         current_market.strike_fetched = true;
+                        println!("✅ Strike price: ${:.2} - resuming data collection", strike);
 
                         // Re-subscribe to new tokens
                         let new_token_ids = vec![

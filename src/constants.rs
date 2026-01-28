@@ -19,7 +19,7 @@ pub const MINUTES_PER_YEAR: f64 = 525_600.0;
 pub const STRIKE_RETRY_ATTEMPTS: u32 = 20;
 
 /// Retry interval in milliseconds for strike price fetching
-pub const STRIKE_RETRY_INTERVAL_MS: u64 = 500;
+pub const STRIKE_RETRY_INTERVAL_MS: u64 = 200;
 
 /// HTTP request timeout in seconds
 pub const HTTP_TIMEOUT_SECS: u64 = 5;
