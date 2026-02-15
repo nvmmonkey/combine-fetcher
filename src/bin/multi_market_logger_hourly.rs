@@ -1,0 +1,977 @@
+// multi_market_logger_hourly.rs - HOURLY CSV ROTATION
+//! Enhanced Multi-Market Data Logger with Hourly CSV Rotation
+//! //  cargo run --bin multi_market_logger_hourly -- 172800 btc_data.csv 1
+//!
+//! BACKWARD COMPATIBLE: Original 23 columns preserved in same order
+//! NEW: 22 additional columns appended for latency/volatility/volume analysis
+//! NEW: Hourly CSV file rotation to prevent large file crashes
+
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Timelike, Utc};
+use rust_decimal::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{debug, error, info, warn};
+
+use combine_fetcher::api::binance::BinanceDataManager;
+use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
+use combine_fetcher::{
+    CSV_RECORD_INTERVAL_SEC, GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
+    MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_INTERVAL_MS,
+};
+
+// ============================================================================
+// CSV RECORD - BACKWARD COMPATIBLE + ENHANCED
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CsvRecord {
+    // === ORIGINAL 23 COLUMNS (PRESERVED ORDER) ===
+    pub timestamp: String,
+    pub market_slug: String,
+    pub binance_price: f64,
+    pub binance_volume: f64,
+    pub yes_bid: f64,
+    pub yes_bid_size: f64,
+    pub yes_ask: f64,
+    pub yes_ask_size: f64,
+    pub no_bid: f64,
+    pub no_bid_size: f64,
+    pub no_ask: f64,
+    pub no_ask_size: f64,
+    pub time_to_open: i64,
+    pub time_to_expiry_minutes: f64,
+    pub strike_price: f64,
+    pub realized_volatility: f64,
+    pub delta_yes: f64,
+    pub gamma: f64,
+    pub vega: f64,
+    pub theta: f64,
+    pub market_resolved: bool,
+    pub outcome: String,
+
+    // === NEW COLUMNS (APPENDED FOR BACKWARD COMPATIBILITY) ===
+
+    // Latency tracking
+    pub timestamp_unix_ms: i64,
+    pub binance_update_ms: i64,
+    pub poly_yes_update_ms: i64,
+    pub poly_no_update_ms: i64,
+    pub latency_binance_poly_ms: i64,
+
+    // Binance orderbook detail
+    pub binance_bid: f64,
+    pub binance_ask: f64,
+    pub binance_spread_bps: f64,
+
+    // Multi-timeframe volatility
+    pub vol_1sec: f64,
+    pub vol_5sec: f64,
+    pub vol_13sec: f64,
+    pub vol_34sec: f64,
+    pub vol_89sec: f64,
+    pub volatility_regime: String,
+
+    // Granular volume
+    pub volume_1sec: f64,
+    pub volume_spike: bool,
+
+    // Signal quality
+    pub signal_quality: String,
+    pub trade_confidence: f64,
+    pub vol_data_source: String,
+
+    // Polymarket spreads
+    pub yes_spread_bps: f64,
+    pub no_spread_bps: f64,
+}
+
+impl CsvRecord {
+    pub fn csv_header() -> &'static str {
+        // ORIGINAL 23 columns first (exact order preserved)
+        "timestamp,market_slug,binance_price,binance_volume,\
+        yes_bid,yes_bid_size,yes_ask,yes_ask_size,\
+        no_bid,no_bid_size,no_ask,no_ask_size,\
+        time_to_open,time_to_expiry_minutes,strike_price,realized_volatility,\
+        delta_yes,gamma,vega,theta,market_resolved,outcome,\
+        timestamp_unix_ms,binance_update_ms,poly_yes_update_ms,poly_no_update_ms,latency_binance_poly_ms,\
+        binance_bid,binance_ask,binance_spread_bps,\
+        vol_1sec,vol_5sec,vol_13sec,vol_34sec,vol_89sec,volatility_regime,\
+        volume_1sec,volume_spike,signal_quality,trade_confidence,vol_data_source,\
+        yes_spread_bps,no_spread_bps"
+    }
+
+    pub fn to_csv_line(&self) -> String {
+        format!(
+            // ORIGINAL 23 columns (exact format preserved)
+            "{},{},{:.2},{:.2},\
+            {:.4},{:.0},{:.4},{:.0},\
+            {:.4},{:.0},{:.4},{:.0},\
+            {},{:.2},{:.2},{:.6},\
+            {:.8},{:.8},{:.8},{:.8},{},{},\
+            {},{},{},{},{},\
+            {:.2},{:.2},{:.4},\
+            {:.6},{:.6},{:.6},{:.6},{:.6},{},\
+            {:.2},{},{},{:.4},{},\
+            {:.4},{:.4}",
+            // Original columns
+            self.timestamp,
+            self.market_slug,
+            self.binance_price,
+            self.binance_volume,
+            self.yes_bid,
+            self.yes_bid_size,
+            self.yes_ask,
+            self.yes_ask_size,
+            self.no_bid,
+            self.no_bid_size,
+            self.no_ask,
+            self.no_ask_size,
+            self.time_to_open,
+            self.time_to_expiry_minutes,
+            self.strike_price,
+            self.realized_volatility,
+            self.delta_yes,
+            self.gamma,
+            self.vega,
+            self.theta,
+            self.market_resolved,
+            self.outcome,
+            // New latency columns
+            self.timestamp_unix_ms,
+            self.binance_update_ms,
+            self.poly_yes_update_ms,
+            self.poly_no_update_ms,
+            self.latency_binance_poly_ms,
+            // New Binance orderbook columns
+            self.binance_bid,
+            self.binance_ask,
+            self.binance_spread_bps,
+            // New volatility columns
+            self.vol_1sec,
+            self.vol_5sec,
+            self.vol_13sec,
+            self.vol_34sec,
+            self.vol_89sec,
+            self.volatility_regime,
+            // New volume columns
+            self.volume_1sec,
+            self.volume_spike,
+            // New signal quality columns
+            self.signal_quality,
+            self.trade_confidence,
+            self.vol_data_source,
+            // New spread columns
+            self.yes_spread_bps,
+            self.no_spread_bps
+        )
+    }
+}
+
+// ============================================================================
+// HOURLY FILE ROTATION
+// ============================================================================
+
+/// Generates hourly CSV filename with timestamp
+/// Example: "output.csv" -> "output_2024-01-15_10.csv"
+fn generate_hourly_filename(base_path: &str, hour_time: DateTime<Utc>) -> String {
+    let path = Path::new(base_path);
+
+    // Extract file stem and extension
+    let stem = path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("data");
+    let extension = path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("csv");
+
+    // Format: {stem}_{YYYY-MM-DD}_{HH}.{ext}
+    let timestamp = hour_time.format("%Y-%m-%d_%H");
+    format!("{}_{}.{}", stem, timestamp, extension)
+}
+
+/// Creates a new hourly CSV file with header
+fn open_new_hourly_file(path: &str) -> Result<BufWriter<std::fs::File>> {
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(path)?;
+
+    let mut writer = BufWriter::with_capacity(64 * 1024, file);
+
+    // Write header
+    writeln!(writer, "{}", CsvRecord::csv_header())?;
+    writer.flush()?;
+
+    Ok(writer)
+}
+
+/// Tracks current CSV file and hour for rotation
+struct HourlyCsvWriter {
+    base_path: String,
+    current_file: Option<BufWriter<std::fs::File>>,
+    current_file_path: String,
+    current_hour: u32,
+}
+
+impl HourlyCsvWriter {
+    fn new(base_path: String) -> Self {
+        Self {
+            base_path,
+            current_file: None,
+            current_file_path: String::new(),
+            current_hour: u32::MAX, // Sentinel value indicating uninitialized
+        }
+    }
+
+    /// Check if hour has changed and rotate if needed
+    /// Returns true if file was rotated
+    fn check_rotation(&mut self, now: &DateTime<Utc>) -> Result<bool> {
+        let hour = now.hour();
+
+        // First time initialization (using u32::MAX as sentinel)
+        if self.current_hour == u32::MAX {
+            self.rotate(now)?;
+            return Ok(true);
+        }
+
+        // Check if hour changed
+        if hour != self.current_hour {
+            self.rotate(now)?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Rotate to new hourly file
+    fn rotate(&mut self, now: &DateTime<Utc>) -> Result<()> {
+        // Flush and close current file if exists
+        if let Some(mut file) = self.current_file.take() {
+            file.flush()?;
+            info!("Rotated CSV file: {}", self.current_file_path);
+        }
+
+        // Generate new filename
+        let new_path = generate_hourly_filename(&self.base_path, *now);
+        self.current_file_path = new_path.clone();
+        self.current_hour = now.hour();
+
+        // Open new file
+        self.current_file = Some(open_new_hourly_file(&new_path)?);
+
+        info!("New hourly CSV file: {}", new_path);
+
+        Ok(())
+    }
+
+    /// Write a record to the current file
+    fn write_record(&mut self, record: &CsvRecord) -> Result<()> {
+        if let Some(ref mut file) = self.current_file {
+            writeln!(file, "{}", record.to_csv_line())?;
+            file.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Flush current file before exit
+    fn flush(&mut self) -> Result<()> {
+        if let Some(mut file) = self.current_file.take() {
+            file.flush()?;
+            info!("Final CSV file flushed: {}", self.current_file_path);
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn calculate_spread_bps(bid: f64, ask: f64) -> f64 {
+    if bid <= 0.0 || ask <= bid {
+        return 0.0;
+    }
+    let mid = (bid + ask) / 2.0;
+    if mid <= 0.0 {
+        return 0.0;
+    }
+    ((ask - bid) / mid) * 10000.0
+}
+
+// ============================================================================
+// MARKET INFO
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct MarketInfo {
+    pub unique_id: String,
+    pub slug: String,
+    pub condition_id: String,
+    pub yes_token_id: String,
+    pub no_token_id: String,
+    pub window_start: i64,
+    pub window_end: i64,
+    pub strike_price: Option<f64>,
+    pub strike_fetched: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolymarketStrikeResponse {
+    #[serde(rename = "openPrice")]
+    open_price: Option<f64>,
+}
+
+// ============================================================================
+// GREEKS
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Greeks {
+    pub delta: f64,
+    pub gamma: f64,
+    pub vega: f64,
+    pub theta: f64,
+}
+
+fn calculate_greeks(spot: f64, strike: f64, ttx_min: f64, vol: f64) -> Greeks {
+    if ttx_min <= 0.01 || vol <= 0.0 || spot <= 0.0 || strike <= 0.0 {
+        return Greeks {
+            delta: if spot >= strike { 1.0 } else { 0.0 },
+            ..Default::default()
+        };
+    }
+
+    let t = ttx_min / MINUTES_PER_YEAR;
+    let sqrt_t = t.sqrt();
+    let d1 = ((spot / strike).ln() + (vol * vol / 2.0) * t) / (vol * sqrt_t);
+    let d2 = ((spot / strike).ln() - (vol * vol / 2.0) * t) / (vol * sqrt_t);
+
+    let norm_pdf = |x: f64| -> f64 { (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt() };
+
+    let n_prime_d2 = norm_pdf(d2);
+
+    Greeks {
+        delta: (n_prime_d2 / (spot * vol * sqrt_t)).clamp(0.0, 1.0),
+        gamma: (n_prime_d2 * d1 / (spot * spot * vol * vol * t)).clamp(-1e6, 1e6),
+        vega: (n_prime_d2 * sqrt_t * 0.01).clamp(-1e6, 1e6),
+        theta: (-(spot * n_prime_d2 * vol) / (2.0 * sqrt_t) / 365.0).clamp(-1e6, 1e6),
+    }
+}
+
+// ============================================================================
+// MARKET FETCHING
+// ============================================================================
+
+async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
+    let now = Utc::now().timestamp();
+    let pos = now % MARKET_WINDOW_SECONDS;
+    let window_start = if pos < 60 {
+        ((now / MARKET_WINDOW_SECONDS) - 1) * MARKET_WINDOW_SECONDS
+    } else {
+        (now / MARKET_WINDOW_SECONDS) * MARKET_WINDOW_SECONDS
+    };
+    let window_end = window_start + MARKET_WINDOW_SECONDS;
+    let unique_id = format!("btc-updown-15m-{}", window_start);
+    let slug = format!("btc-updown-15m-{}", window_start);
+    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
+
+    info!("Fetching current market: {}", unique_id);
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Market fetch failed: {}", resp.status()));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let markets = data["markets"]
+        .as_array()
+        .ok_or_else(|| anyhow!("No markets"))?;
+
+    for m in markets {
+        if !m["active"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let outcomes: Vec<String> =
+            serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
+        let tokens: Vec<String> =
+            serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
+        if outcomes.len() != 2 || tokens.len() != 2 {
+            continue;
+        }
+
+        let up_idx = outcomes.iter().position(|o| o == "Up");
+        let down_idx = outcomes.iter().position(|o| o == "Down");
+
+        if let (Some(ui), Some(di)) = (up_idx, down_idx) {
+            return Ok(MarketInfo {
+                unique_id,
+                slug,  // Use the locally constructed value to ensure consistency with unique_id
+                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
+                yes_token_id: tokens[ui].clone(),
+                no_token_id: tokens[di].clone(),
+                window_start,
+                window_end,
+                strike_price: None,
+                strike_fetched: false,
+            });
+        }
+    }
+    Err(anyhow!("No valid BTC market for current window"))
+}
+
+async fn fetch_next_market_after(
+    client: &reqwest::Client,
+    current_window_start: i64,
+) -> Result<MarketInfo> {
+    let next_window_start = current_window_start + MARKET_WINDOW_SECONDS;
+    let window_end = next_window_start + MARKET_WINDOW_SECONDS;
+    let unique_id = format!("btc-updown-15m-{}", next_window_start);
+    let slug = format!("btc-updown-15m-{}", next_window_start);
+    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
+
+    info!("Fetching next market: {}", unique_id);
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Market fetch failed: {}", resp.status()));
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let markets = data["markets"]
+        .as_array()
+        .ok_or_else(|| anyhow!("No markets"))?;
+
+    for m in markets {
+        if !m["active"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        let outcomes: Vec<String> =
+            serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
+        let tokens: Vec<String> =
+            serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
+        if outcomes.len() != 2 || tokens.len() != 2 {
+            continue;
+        }
+
+        let up_idx = outcomes.iter().position(|o| o == "Up");
+        let down_idx = outcomes.iter().position(|o| o == "Down");
+
+        if let (Some(ui), Some(di)) = (up_idx, down_idx) {
+            return Ok(MarketInfo {
+                unique_id,
+                slug,  // Use the locally constructed value to ensure consistency with unique_id
+                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
+                yes_token_id: tokens[ui].clone(),
+                no_token_id: tokens[di].clone(),
+                window_start: next_window_start,
+                window_end,
+                strike_price: None,
+                strike_fetched: false,
+            });
+        }
+    }
+    Err(anyhow!("No valid BTC market for next window"))
+}
+
+async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) -> Result<f64> {
+    let start =
+        DateTime::from_timestamp(market.window_start, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
+    let end =
+        DateTime::from_timestamp(market.window_end, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
+
+    let url = format!(
+        "{}/crypto-price?symbol=BTC&eventStartTime={}&variant=fifteen&endDate={}",
+        POLY_CRYPTO_API_URL,
+        start.format("%Y-%m-%dT%H:%M:%SZ"),
+        end.format("%Y-%m-%dT%H:%M:%SZ")
+    );
+
+    debug!("Strike fetch URL for {}: {}", market.unique_id, url);
+
+    // Infinite retry with exponential backoff - keep trying until success
+    let mut attempt = 1u64;
+    let mut backoff_ms = STRIKE_RETRY_INTERVAL_MS;
+
+    loop {
+        debug!("Attempting strike fetch (attempt {}) for {}", attempt, market.unique_id);
+
+        match client
+            .get(&url)
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    match resp.json::<PolymarketStrikeResponse>().await {
+                        Ok(data) => {
+                            if let Some(price) = data.open_price {
+                                info!(
+                                    "✅ Strike fetched for {} on attempt {}: ${:.2}",
+                                    market.unique_id, attempt, price
+                                );
+                                return Ok(price);
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Attempt {} for {}: JSON parse error: {}",
+                                attempt, market.unique_id, e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Attempt {} for {}: Request failed: {}",
+                    attempt, market.unique_id, e
+                );
+            }
+        }
+
+        // Exponential backoff: 500ms -> 1s -> 2s -> 4s -> ... (max 30s)
+        info!(
+            "⏳ Strike fetch not yet available, retrying in {}ms... (attempt {})",
+            backoff_ms, attempt
+        );
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+        backoff_ms = (backoff_ms * 2).min(500); // Cap at 5 seconds
+        attempt += 1;
+    }
+}
+
+// ============================================================================
+// HELPER: Truncate token ID for display
+// ============================================================================
+
+pub fn truncate_id(id: &str, first: usize, last: usize) -> String {
+    let len = id.len();
+    if len <= first + last {
+        return id.to_string();
+    }
+    format!("{}...{}", &id[..first], &id[len - last..])
+}
+
+// ============================================================================
+// MAIN - ENHANCED DATA COLLECTION LOOP WITH HOURLY ROTATION
+// ============================================================================
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("multi_market_logger_hourly=info".parse().unwrap())
+                .add_directive("combine_fetcher=info".parse().unwrap()),
+        )
+        .init();
+
+    println!("╔═══════════════════════════════════════════════════════════╗");
+    println!("║ Enhanced Multi-Market Data Logger (Hourly Rotation)       ║");
+    println!("║ Original 23 cols + 22 new cols + HOURLY FILE ROTATION    ║");
+    println!("╚═══════════════════════════════════════════════════════════╝\n");
+
+    let args: Vec<String> = std::env::args().collect();
+    let duration: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(28800);
+    let csv_path = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| "overnight_btc_data.csv".into());
+    let csv_record_interval_sec: u64 = args
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(CSV_RECORD_INTERVAL_SEC);
+
+    println!(
+        "Duration: {}s ({:.1}h) | Output Base: {} | Interval: {}s\n",
+        duration,
+        duration as f64 / 3600.0,
+        csv_path,
+        csv_record_interval_sec
+    );
+    println!("ℹ️  CSV files will rotate hourly with format: <base>_YYYY-MM-DD_HH.csv");
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(3))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build()?;
+
+    println!("⏳ Fetching current market...");
+    let mut current_market = fetch_current_market(&http).await?;
+    println!(
+        "✅ Market: {} | YES: {}... | NO: {}...",
+        current_market.unique_id,
+        &current_market.yes_token_id[..10],
+        &current_market.no_token_id[..10]
+    );
+
+    // Setup Binance
+    let mut binance_manager = BinanceDataManager::new();
+    binance_manager.connect(&["BTCUSDT"], None).await?;
+    println!("✅ Binance connected");
+
+    // Bootstrap volatility with historical data
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    println!("⏳ Bootstrapping volatility with historical data...");
+    match binance_manager.bootstrap_volatility("BTCUSDT", 70).await {
+        Ok(count) => println!("✅ Bootstrapped with {} 1-min candles", count),
+        Err(e) => warn!("⚠️ Bootstrap failed: {} - will use defaults", e),
+    }
+
+    // Fetch strike with infinite retry BEFORE starting data collection
+    println!("⏳ Fetching strike price for {}...", current_market.unique_id);
+    println!("ℹ️  NOTE: Will retry indefinitely until strike price is available (exponential backoff, max 30s)");
+    let strike = fetch_strike_with_retry(&http, &current_market).await?;
+    current_market.strike_price = Some(strike);
+    current_market.strike_fetched = true;
+    println!("✅ Strike price: ${:.2} - ready to start logging", strike);
+
+    // Setup Polymarket stream
+    let poly_stream = Arc::new(PolymarketOrderbookStream::new());
+    let token_ids = vec![
+        current_market.yes_token_id.clone(),
+        current_market.no_token_id.clone(),
+    ];
+
+    let mut rx = poly_stream.clone().stream(token_ids).await?;
+
+    // Spawn task to consume Polymarket updates (they update internal cache)
+    tokio::spawn(async move {
+        while let Some(_update) = rx.recv().await {
+            // Updates are handled internally by PolymarketOrderbookStream
+        }
+    });
+
+    println!("✅ Polymarket connected");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Initialize hourly CSV writer
+    let mut csv_writer = HourlyCsvWriter::new(csv_path.clone());
+
+    // Initial file creation
+    let now = Utc::now();
+    csv_writer.check_rotation(&now)?;
+    println!("✅ Initial CSV file created");
+
+    let start_time = SystemTime::now();
+    let end_time = start_time + Duration::from_secs(duration);
+    let mut tick: u64 = 0;
+    let mut last_log_ms: i64 = 0;
+    let mut markets_tracked: usize = 1;
+
+    // Track consecutive market fetch failures to prevent tight retry loops
+    let mut consecutive_fetch_failures: u32 = 0;
+    const MAX_CONSECUTIVE_FETCH_FAILURES: u32 = 10;
+    let mut last_fetch_attempt_ms: i64 = 0;
+    const FETCH_RETRY_COOLDOWN_MS: i64 = 5000;
+
+    info!("Starting enhanced data collection with hourly rotation...");
+
+    loop {
+        if SystemTime::now() >= end_time {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let now = Utc::now();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // === HOURLY ROTATION CHECK ===
+        // Check if hour has changed and rotate CSV file if needed
+        if csv_writer.check_rotation(&now)? {
+            info!("🔄 Hourly CSV rotation completed");
+        }
+
+        // Get MarketSnapshot (contains all Binance data)
+        let snapshot = match binance_manager.get_market_snapshot("BTCUSDT").await {
+            Some(s) => s,
+            None => continue,
+        };
+
+        // CSV recording frequency control
+        let should_record = if csv_record_interval_sec == 0 {
+            const MIN_EVENT_INTERVAL_MS: i64 = 10;
+            now_ms - last_log_ms >= MIN_EVENT_INTERVAL_MS
+        } else {
+            let interval_ms = (csv_record_interval_sec * 1000) as i64;
+            now_ms - last_log_ms >= interval_ms
+        };
+
+        if !should_record {
+            continue;
+        }
+
+        last_log_ms = now_ms;
+        let now_ts = now.timestamp();
+
+        // Get Polymarket prices (from internal cache)
+        let yes_prices = poly_stream.get_prices(&current_market.yes_token_id);
+        let no_prices = poly_stream.get_prices(&current_market.no_token_id);
+
+        // Extract Polymarket update timestamps
+        let poly_yes_update_ms = yes_prices
+            .as_ref()
+            .map(|p| p.last_update_ms)
+            .unwrap_or(now_ms);
+        let poly_no_update_ms = no_prices
+            .as_ref()
+            .map(|p| p.last_update_ms)
+            .unwrap_or(now_ms);
+
+        // Binance update time from snapshot
+        let binance_update_ms = snapshot.timestamp;
+
+        // Calculate latency differential
+        let poly_avg_update = (poly_yes_update_ms + poly_no_update_ms) / 2;
+        let latency_ms = binance_update_ms - poly_avg_update;
+
+        // Get Binance bid/ask
+        let (binance_bid, binance_ask) = binance_manager
+            .get_bid_ask("BTCUSDT")
+            .await
+            .unwrap_or((snapshot.spot_price, snapshot.spot_price));
+
+        let time_to_open = current_market.window_start - now_ts;
+        let ttx = if time_to_open > 0 {
+            (current_market.window_end - now_ts) as f64 / 60.0
+        } else {
+            ((current_market.window_end - now_ts) as f64 / 60.0).max(0.0)
+        };
+
+        let resolved = ttx <= 0.0;
+        let strike = current_market.strike_price.unwrap_or(snapshot.spot_price);
+        let greeks = calculate_greeks(
+            snapshot.spot_price,
+            strike,
+            ttx,
+            snapshot.realized_volatility,
+        );
+
+        let outcome = if resolved {
+            if snapshot.spot_price >= strike {
+                "YES"
+            } else {
+                "NO"
+            }
+        } else {
+            ""
+        };
+
+        // Determine volatility data source
+        let vol_data_source = if snapshot.volatility_regime == "BOOTSTRAP" {
+            "BOOTSTRAP".to_string()
+        } else if binance_manager
+            .is_volatility_ready("BTCUSDT")
+            .await
+            .unwrap_or(false)
+        {
+            "REALTIME".to_string()
+        } else {
+            "1MIN_FALLBACK".to_string()
+        };
+
+        // Extract Polymarket prices
+        let yes_bid = yes_prices
+            .as_ref()
+            .and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+        let yes_ask = yes_prices
+            .as_ref()
+            .and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+        let no_bid = no_prices
+            .as_ref()
+            .and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+        let no_ask = no_prices
+            .as_ref()
+            .and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0)))
+            .unwrap_or(0.0);
+
+        let yes_spread = calculate_spread_bps(yes_bid, yes_ask);
+        let no_spread = calculate_spread_bps(no_bid, no_ask);
+
+        // Build record (backward compatible order)
+        let record = CsvRecord {
+            // ORIGINAL 23 columns
+            timestamp: now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+            market_slug: current_market.slug.clone(),
+            binance_price: snapshot.spot_price,
+            binance_volume: snapshot.volume_1min,
+            yes_bid,
+            yes_bid_size: yes_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
+            yes_ask,
+            yes_ask_size: yes_prices.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0),
+            no_bid,
+            no_bid_size: no_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
+            no_ask,
+            no_ask_size: no_prices.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0),
+            time_to_open,
+            time_to_expiry_minutes: ttx,
+            strike_price: strike,
+            realized_volatility: snapshot.realized_volatility,
+            delta_yes: greeks.delta,
+            gamma: greeks.gamma,
+            vega: greeks.vega,
+            theta: greeks.theta,
+            market_resolved: resolved,
+            outcome: outcome.to_string(),
+
+            // NEW 22 columns (appended)
+            timestamp_unix_ms: now_ms,
+            binance_update_ms,
+            poly_yes_update_ms,
+            poly_no_update_ms,
+            latency_binance_poly_ms: latency_ms,
+            binance_bid,
+            binance_ask,
+            binance_spread_bps: snapshot.spread_bps,
+            vol_1sec: snapshot.vol_1sec,
+            vol_5sec: snapshot.vol_5sec,
+            vol_13sec: snapshot.vol_13sec,
+            vol_34sec: snapshot.vol_34sec,
+            vol_89sec: snapshot.vol_89sec,
+            volatility_regime: snapshot.volatility_regime.clone(),
+            volume_1sec: snapshot.volume_1sec,
+            volume_spike: snapshot.volume_spike,
+            signal_quality: snapshot.signal_quality.clone(),
+            trade_confidence: snapshot.trade_confidence,
+            vol_data_source: vol_data_source.clone(),
+            yes_spread_bps: yes_spread,
+            no_spread_bps: no_spread,
+        };
+
+        // Write to current hourly file
+        csv_writer.write_record(&record)?;
+
+        tick += 1;
+
+        if tick % 100 == 0 {
+            info!(
+                "#{} Market={} TTX={:.1}m | Hour={:02}",
+                tick, current_market.unique_id, ttx, now.hour()
+            );
+            info!(
+                "yesIDX={} | noIDX={}",
+                truncate_id(&current_market.yes_token_id, 4, 2),
+                truncate_id(&current_market.no_token_id, 4, 2)
+            );
+            info!(
+                "BTC=${:.0}@${:.0} | Yes:{:.2}@{:.0} | No:{:.2}@{:.0} | Vol:{:.4}% | Δ:{:.6} | Γ:{:.6} | v:{:.6} | Θ:{:.6}",
+                record.binance_price, record.binance_volume, record.yes_bid, record.yes_bid_size,
+                record.no_bid, record.no_bid_size, record.realized_volatility*100.0,
+                record.delta_yes, record.gamma, record.vega, record.theta
+            );
+            info!(
+                "Lag={}ms | BASpr={:.2}bps | VolRege={} | VolSrc={} | Vol[1s/5s/89s]={:.4}/{:.4}/{:.4}",
+                latency_ms, snapshot.spread_bps, snapshot.volatility_regime, vol_data_source,
+                snapshot.vol_1sec, snapshot.vol_5sec, snapshot.vol_89sec
+            );
+            info!(
+                "Volume[1s/1m]={:.0}/{:.0} | Spike={} | YesSpr={:.2}bps | NoSpr={:.2}bps | Q*={} | Conf={:.2}",
+                snapshot.volume_1sec, snapshot.volume_1min, snapshot.volume_spike,
+                yes_spread, no_spread, snapshot.signal_quality, snapshot.trade_confidence
+            );
+        }
+
+        // Check if market expired - rotate to next
+        if resolved {
+            // Check if we need to cool down before retrying (prevent tight retry loops)
+            let time_since_last_fetch_attempt = if last_fetch_attempt_ms > 0 {
+                now_ms.saturating_sub(last_fetch_attempt_ms)
+            } else {
+                i64::MAX
+            };
+
+            let should_attempt_fetch = consecutive_fetch_failures == 0
+                || (time_since_last_fetch_attempt >= FETCH_RETRY_COOLDOWN_MS
+                    && consecutive_fetch_failures < MAX_CONSECUTIVE_FETCH_FAILURES);
+
+            if should_attempt_fetch {
+                last_fetch_attempt_ms = now_ms;
+
+                info!(
+                    "🔄 Market {} expired (TTX={:.1}m) - rotating to next market...",
+                    current_market.unique_id, ttx
+                );
+                match fetch_next_market_after(&http, current_market.window_start).await {
+                    Ok(next_market) => {
+                        info!("✅ Rotated to: {}", next_market.unique_id);
+                        current_market = next_market;
+                        markets_tracked += 1;
+
+                        // Reset failure counter on successful rotation
+                        consecutive_fetch_failures = 0;
+
+                        // Fetch strike for the new market (infinite retry, no fallback)
+                        println!("⏳ Fetching strike price for {}...", current_market.unique_id);
+                        let strike = fetch_strike_with_retry(&http, &current_market).await?;
+                        current_market.strike_price = Some(strike);
+                        current_market.strike_fetched = true;
+                        println!("✅ Strike price: ${:.2} - resuming data collection", strike);
+
+                        // Re-subscribe to new tokens
+                        let new_token_ids = vec![
+                            current_market.yes_token_id.clone(),
+                            current_market.no_token_id.clone(),
+                        ];
+                        let mut new_rx = poly_stream.clone().stream(new_token_ids).await?;
+
+                        tokio::spawn(async move { while let Some(_update) = new_rx.recv().await {} });
+
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(e) => {
+                        consecutive_fetch_failures += 1;
+                        warn!("⚠️ Failed to fetch next market (attempt {}/{}): {}",
+                            consecutive_fetch_failures, MAX_CONSECUTIVE_FETCH_FAILURES, e);
+
+                        if consecutive_fetch_failures >= MAX_CONSECUTIVE_FETCH_FAILURES {
+                            error!("❌ Too many consecutive fetch failures ({}). Exiting to prevent tight loop.",
+                                MAX_CONSECUTIVE_FETCH_FAILURES);
+                            break;
+                        }
+
+                        warn!("⏳ Will retry in {}s. Continuing with current market until cooldown expires...",
+                            FETCH_RETRY_COOLDOWN_MS / 1000);
+                    }
+                }
+            } else if time_since_last_fetch_attempt < FETCH_RETRY_COOLDOWN_MS {
+                // In cooldown period - skip fetch attempt this iteration
+                debug!("⏸️  In cooldown period ({}ms remaining until retry)",
+                    FETCH_RETRY_COOLDOWN_MS - time_since_last_fetch_attempt);
+            }
+        }
+    }
+
+    // Flush final file
+    csv_writer.flush()?;
+
+    info!("✅ Collection complete!");
+    info!("   Duration: {:.1} hours", duration as f64 / 3600.0);
+    info!("   Markets tracked: {}", markets_tracked);
+    info!("   Total ticks: {}", tick);
+    info!("   Output base: {}", csv_path);
+    info!("   Hourly files created in pattern: <base>_YYYY-MM-DD_HH.csv");
+    println!("\n✅ Complete!");
+
+    Ok(())
+}

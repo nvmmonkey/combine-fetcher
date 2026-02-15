@@ -101,7 +101,7 @@ struct BinanceAggTradeEvent {
     _event_type: String,
     /// Event time in milliseconds
     #[serde(rename = "E")]
-    _event_time: i64,
+    event_time: u64,
     /// Symbol (e.g., "BTCUSDT")
     #[serde(rename = "s")]
     symbol: String,
@@ -190,6 +190,8 @@ pub struct BinanceDataManager {
     vol_calculators: HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>,
     /// Volume trackers per symbol: symbol -> tracker
     volume_trackers: HashMap<String, Arc<Mutex<VolumeTracker>>>,
+    /// Latest event times per symbol: symbol -> event_time_ms (from Binance streams)
+    event_times: Arc<RwLock<HashMap<String, u64>>>,
     /// HTTP client for REST API calls (reusable)
     http_client: reqwest::Client,
 }
@@ -212,6 +214,7 @@ impl BinanceDataManager {
             reconnecting_agg: Arc::new(RwLock::new(false)),
             vol_calculators: HashMap::new(),
             volume_trackers: HashMap::new(),
+            event_times: Arc::new(RwLock::new(HashMap::new())),
             http_client,
         }
     }
@@ -236,6 +239,7 @@ impl BinanceDataManager {
             reconnecting_agg: Arc::new(RwLock::new(false)),
             vol_calculators: HashMap::new(),
             volume_trackers: HashMap::new(),
+            event_times: Arc::new(RwLock::new(HashMap::new())),
             http_client,
         }
     }
@@ -495,6 +499,7 @@ impl BinanceDataManager {
         let symbols_clone = self.symbols.clone();
         let ws_url_clone = self.ws_url.clone();
         let vol_calculators = self.vol_calculators.clone();
+        let event_times = self.event_times.clone();
 
         // Spawn the bookTicker WebSocket connection task
         tokio::spawn(async move {
@@ -505,6 +510,7 @@ impl BinanceDataManager {
                 symbols_clone,
                 ws_url_clone,
                 vol_calculators,
+                event_times,
             )
             .await
         });
@@ -515,6 +521,7 @@ impl BinanceDataManager {
         let symbols_agg = self.symbols.clone();
         let ws_url_agg = self.ws_url.clone();
         let volume_trackers = self.volume_trackers.clone();
+        let event_times_agg = self.event_times.clone();
 
         tokio::spawn(async move {
             Self::aggtrade_connection_loop(
@@ -524,6 +531,7 @@ impl BinanceDataManager {
                 symbols_agg,
                 ws_url_agg,
                 volume_trackers,
+                event_times_agg,
             )
             .await
         });
@@ -604,6 +612,18 @@ impl BinanceDataManager {
             .unwrap()
             .as_millis() as i64;
 
+        // using aggregate trade event time for more accurate volume tracking
+        // Get Binance event time for this symbol (from aggTrade stream)
+        // let current_time = {
+        //     let event_times = self.event_times.read().await;
+        //     event_times.get(&upper_symbol).copied().unwrap_or_else(|| {
+        //         std::time::SystemTime::now()
+        //             .duration_since(std::time::UNIX_EPOCH)
+        //             .unwrap()
+        //             .as_millis() as u64
+        //     }) as i64
+        // };
+
         let tracker = volume_tracker.lock().await;
         Some((
             tracker.get_volume_1sec(current_time),
@@ -647,11 +667,18 @@ impl BinanceDataManager {
 
         let spot_price = price_data.mid.to_f64().unwrap_or(0.0);
 
-        // Get current time
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        // Get Binance event time for this symbol (use the most recent from either stream)
+        // This is the event time from Binance's streams, not local computer time
+        let current_time = {
+            let event_times = self.event_times.read().await;
+            event_times.get(&upper_symbol).copied().unwrap_or_else(|| {
+                // Fallback to local time if no event time available yet
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+            }) as i64
+        };
 
         // Get volatility calculator for this symbol (prices lock already released)
         let vol_calculator = self.vol_calculators.get(&upper_symbol)?;
@@ -723,6 +750,7 @@ impl BinanceDataManager {
         _symbols: Vec<String>,
         _ws_url: String,
         vol_calculators: HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>,
+        event_times: Arc<RwLock<HashMap<String, u64>>>,
     ) {
         let mut reconnect_delay = tokio::time::Duration::from_secs(1);
         const MAX_RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(30);
@@ -758,6 +786,7 @@ impl BinanceDataManager {
                                     &text,
                                     &prices,
                                     &vol_calculators,
+                                    &event_times,
                                 )
                                 .await
                                 {
@@ -818,6 +847,7 @@ impl BinanceDataManager {
         _symbols: Vec<String>,
         _ws_url: String,
         volume_trackers: HashMap<String, Arc<Mutex<VolumeTracker>>>,
+        event_times: Arc<RwLock<HashMap<String, u64>>>,
     ) {
         let mut reconnect_delay = tokio::time::Duration::from_secs(1);
         const MAX_RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(30);
@@ -848,9 +878,13 @@ impl BinanceDataManager {
                     while let Some(msg_result) = ws_receiver.next().await {
                         match msg_result {
                             Ok(Message::Text(text)) => {
-                                if let Err(e) =
-                                    Self::handle_aggtrade_message(&text, &prices, &volume_trackers)
-                                        .await
+                                if let Err(e) = Self::handle_aggtrade_message(
+                                    &text,
+                                    &prices,
+                                    &volume_trackers,
+                                    &event_times,
+                                )
+                                .await
                                 {
                                     warn!("Failed to parse aggTrade message: {}", e);
                                 }
@@ -910,6 +944,7 @@ impl BinanceDataManager {
         text: &str,
         prices: &Arc<RwLock<HashMap<String, BinancePrice>>>,
         vol_calculators: &HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>,
+        event_times: &Arc<RwLock<HashMap<String, u64>>>,
     ) -> Result<()> {
         // Parse the bookTicker message
         let ticker: BinanceBookTicker =
@@ -925,19 +960,41 @@ impl BinanceDataManager {
             .parse::<Decimal>()
             .map_err(|_| anyhow!("Invalid ask price: {}", ticker.ask_price))?;
 
-        // Calculate mid price for volatility tracking
-        let mid = (bid + ask) / Decimal::from(2);
-
-        // Update volatility calculator with new price (symbol-specific)
+        // bookTicker doesn't have an event_time field, so we use the current time
+        // when we RECEIVE the message. This represents when the price update arrived.
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_millis() as i64;
+            .as_millis() as u64;
+
+        // compare using aggregate timestamp
+        // Get Binance event time for this symbol (from aggTrade stream)
+        // let current_time = {
+        //     let event_times = self.event_times.read().await;
+        //     event_times.get(&upper_symbol).copied().unwrap_or_else(|| {
+        //         std::time::SystemTime::now()
+        //             .duration_since(std::time::UNIX_EPOCH)
+        //             .unwrap()
+        //             .as_millis() as u64
+        //     }) as i64
+        // };
+
+        // Store this timestamp - it represents the freshest price data timing
+        {
+            let mut event_times_guard = event_times.write().await;
+            event_times_guard.insert(symbol.clone(), current_time);
+        }
+
+        // Calculate mid price for volatility tracking
+        let mid = (bid + ask) / Decimal::from(2);
+
+        // Update volatility calculator with current time
+        let event_time_i64 = current_time as i64;
         let mid_price = mid.to_f64().unwrap_or(0.0);
         if mid_price > 0.0 {
             if let Some(vol_calculator) = vol_calculators.get(&symbol) {
                 let mut vol_calc = vol_calculator.lock().await;
-                vol_calc.add_price(current_time, mid_price);
+                vol_calc.add_price(event_time_i64, mid_price);
             }
         }
 
@@ -969,6 +1026,7 @@ impl BinanceDataManager {
         text: &str,
         _prices: &Arc<RwLock<HashMap<String, BinancePrice>>>,
         volume_trackers: &HashMap<String, Arc<Mutex<VolumeTracker>>>,
+        event_times: &Arc<RwLock<HashMap<String, u64>>>,
     ) -> Result<()> {
         // Parse the aggTrade message
         let trade: BinanceAggTradeEvent =
@@ -984,19 +1042,22 @@ impl BinanceDataManager {
             .parse::<Decimal>()
             .map_err(|_| anyhow!("Invalid trade quantity: {}", trade.quantity))?;
 
+        // Store the Binance event time
+        {
+            let mut event_times_guard = event_times.write().await;
+            event_times_guard.insert(symbol.clone(), trade.event_time);
+        }
+
         // Calculate volume in USDT (price * quantity)
         let trade_volume = price * quantity;
         let trade_volume_f64 = trade_volume.to_f64().unwrap_or(0.0);
 
-        // Update volume tracker for rolling window calculations (FIX: no race condition here)
+        // Update volume tracker with Binance event time (not local time)
         if trade_volume_f64 > 0.0 {
             if let Some(volume_tracker) = volume_trackers.get(&symbol) {
                 let mut vol_tracker = volume_tracker.lock().await;
-                let current_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64;
-                vol_tracker.add_trade(current_time, trade_volume_f64);
+                let event_time_i64 = trade.event_time as i64;
+                vol_tracker.add_trade(event_time_i64, trade_volume_f64);
             }
         }
 

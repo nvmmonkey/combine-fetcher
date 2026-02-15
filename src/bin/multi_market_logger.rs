@@ -429,7 +429,7 @@ async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) 
         );
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
 
-        backoff_ms = (backoff_ms * 2).min(5000); // Cap at 5 seconds
+        backoff_ms = (backoff_ms * 2).min(500); // Cap at 5 seconds
         attempt += 1;
     }
 }
