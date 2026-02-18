@@ -18,3 +18,6 @@ pub use volatility::{
     PriceTick,
     VolumeTick,
 };
+
+
+pub use api::{RtdsTracker, RtdsSnapshot};

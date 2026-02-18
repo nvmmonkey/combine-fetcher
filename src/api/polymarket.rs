@@ -12,11 +12,11 @@
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use futures::StreamExt;
+use polymarket_client_sdk::clob::types::request::{LastTradePriceRequest, MidpointRequest};
 use polymarket_client_sdk::clob::ws::Client as WsClient;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config};
-use polymarket_client_sdk::clob::types::request::{LastTradePriceRequest, MidpointRequest};
 use polymarket_client_sdk::types::U256;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};  // <-- FIXED: Added FromPrimitive back
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive}; // <-- FIXED: Added FromPrimitive back
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -71,19 +71,19 @@ pub struct TokenPrices {
     pub token_id: String,
     pub best_bid: Option<Decimal>,
     pub best_ask: Option<Decimal>,
-    pub best_bid_size: f64,        // Size at best bid price (from orderbook feed)
-    pub best_ask_size: f64,        // Size at best ask price (from orderbook feed)
+    pub best_bid_size: f64, // Size at best bid price (from orderbook feed)
+    pub best_ask_size: f64, // Size at best ask price (from orderbook feed)
     pub mid_price: Option<Decimal>,
-    pub last_trade: Option<f64>,   // Last trade price
+    pub last_trade: Option<f64>, // Last trade price
     pub last_update_ms: i64,
-    pub ws_connected: bool,        // WebSocket connection status (stream is active)
-    pub reconnect_count: u32,      // Number of reconnections for this token's stream
-    pub last_disconnect_ms: i64,   // Timestamp of last disconnection
-    pub last_successful_connect_ms: i64,  // Timestamp of last successful connection
-    pub consecutive_errors: u32,   // Number of consecutive stream errors
-    pub last_ws_update_ms: i64,    // NEW: Timestamp of last WebSocket update (vs API update)
-    pub ws_message_count: u64,     // NEW: Count of WebSocket messages received
-    pub api_fallback_count: u64,   // NEW: Count of API fallback calls
+    pub ws_connected: bool,   // WebSocket connection status (stream is active)
+    pub reconnect_count: u32, // Number of reconnections for this token's stream
+    pub last_disconnect_ms: i64, // Timestamp of last disconnection
+    pub last_successful_connect_ms: i64, // Timestamp of last successful connection
+    pub consecutive_errors: u32, // Number of consecutive stream errors
+    pub last_ws_update_ms: i64, // NEW: Timestamp of last WebSocket update (vs API update)
+    pub ws_message_count: u64, // NEW: Count of WebSocket messages received
+    pub api_fallback_count: u64, // NEW: Count of API fallback calls
 }
 
 impl TokenPrices {
@@ -174,15 +174,30 @@ impl TokenPrices {
         };
 
         if !self.ws_connected {
-            format!("DISCONNECTED | using API fallback | last_update={}s ago", data_age)
+            format!(
+                "DISCONNECTED | using API fallback | last_update={}s ago",
+                data_age
+            )
         } else if self.consecutive_errors >= STREAM_ERROR_THRESHOLD {
-            format!("UNHEALTHY | ws_connected but {} errors | ws_age={}s", self.consecutive_errors, ws_age)
+            format!(
+                "UNHEALTHY | ws_connected but {} errors | ws_age={}s",
+                self.consecutive_errors, ws_age
+            )
         } else if ws_age >= 0 && ws_age < 10 {
-            format!("HEALTHY_WS | active stream | last_ws={}s ago | msgs={}", ws_age, self.ws_message_count)
+            format!(
+                "HEALTHY_WS | active stream | last_ws={}s ago | msgs={}",
+                ws_age, self.ws_message_count
+            )
         } else if ws_age >= 10 && ws_age < SILENT_DISCONNECT_THRESHOLD_MS / 1000 {
-            format!("QUIET_WS | connected but quiet | last_ws={}s ago | normal for 15m markets", ws_age)
+            format!(
+                "QUIET_WS | connected but quiet | last_ws={}s ago | normal for 15m markets",
+                ws_age
+            )
         } else {
-            format!("STALE_WS | connected but very stale | last_ws={}s ago | api_fallbacks={}", ws_age, self.api_fallback_count)
+            format!(
+                "STALE_WS | connected but very stale | last_ws={}s ago | api_fallbacks={}",
+                ws_age, self.api_fallback_count
+            )
         }
     }
 }
@@ -210,7 +225,8 @@ fn find_size_at_price(orders: &[OrderBookLevel], target_price: Option<Decimal>) 
     if let Some(target) = target_price {
         if let Some(target_f) = target.to_f64() {
             for order in orders {
-                if let (Some(price), Some(order_size)) = (order.price.to_f64(), order.size.to_f64()) {
+                if let (Some(price), Some(order_size)) = (order.price.to_f64(), order.size.to_f64())
+                {
                     if (price - target_f).abs() < PRICE_MATCH_TOLERANCE {
                         size = order_size;
                         break;
@@ -318,16 +334,16 @@ impl PolymarketOrderbookStream {
         if self.prices.is_empty() {
             return 0.0;
         }
-        let healthy_count = self.prices.iter()
+        let healthy_count = self
+            .prices
+            .iter()
             .filter(|p| {
                 let prices = p.value();
                 // Consider healthy if:
                 // 1. WebSocket is connected
                 // 2. Has received some data (ever)
                 // 3. No excessive errors
-                prices.ws_connected 
-                    && prices.last_update_ms > 0
-                    && !prices.is_unhealthy()
+                prices.ws_connected && prices.last_update_ms > 0 && !prices.is_unhealthy()
             })
             .count();
         (healthy_count as f64 / self.prices.len() as f64) * 100.0
@@ -380,27 +396,32 @@ impl PolymarketOrderbookStream {
         let last_book_reco = self.last_book_reconnect_ms();
 
         let price_reco_age = if last_price_reco > 0 {
-            format!("{}s ago", (now_ms.saturating_sub(last_price_reco as i64) / 1000))
+            format!(
+                "{}s ago",
+                (now_ms.saturating_sub(last_price_reco as i64) / 1000)
+            )
         } else {
             "never".to_string()
         };
 
         let book_reco_age = if last_book_reco > 0 {
-            format!("{}s ago", (now_ms.saturating_sub(last_book_reco as i64) / 1000))
+            format!(
+                "{}s ago",
+                (now_ms.saturating_sub(last_book_reco as i64) / 1000)
+            )
         } else {
             "never".to_string()
         };
 
         // Count tokens by data source
-        let (ws_count, api_count) = self.prices.iter()
-            .fold((0, 0), |(ws, api), entry| {
-                let prices = entry.value();
-                if prices.data_source() == "WS" {
-                    (ws + 1, api)
-                } else {
-                    (ws, api + 1)
-                }
-            });
+        let (ws_count, api_count) = self.prices.iter().fold((0, 0), |(ws, api), entry| {
+            let prices = entry.value();
+            if prices.data_source() == "WS" {
+                (ws + 1, api)
+            } else {
+                (ws, api + 1)
+            }
+        });
 
         format!(
             "Health: {:.1}% | WS:{} API:{} | Price reco: {} ({}) | Book reco: {} ({}) | Very stale: {} | WS msgs: {} | API calls: {}",
@@ -419,10 +440,15 @@ impl PolymarketOrderbookStream {
 
     /// Get detailed status for each token
     pub fn detailed_status(&self) -> Vec<(String, String)> {
-        self.prices.iter()
+        self.prices
+            .iter()
             .map(|entry| {
                 let token_id = entry.key().clone();
-                let short_id = if token_id.len() > 8 { &token_id[..8] } else { &token_id };
+                let short_id = if token_id.len() > 8 {
+                    &token_id[..8]
+                } else {
+                    &token_id
+                };
                 let detail = entry.value().connection_detail();
                 (short_id.to_string(), detail)
             })
@@ -468,7 +494,10 @@ impl PolymarketOrderbookStream {
             let mut reconnect_attempt = 0u32;
             let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
-            info!("[PRICE_STREAM] Starting for {} tokens", asset_ids_price.len());
+            info!(
+                "[PRICE_STREAM] Starting for {} tokens",
+                asset_ids_price.len()
+            );
 
             // Outer reconnection loop - runs forever until channel closes
             loop {
@@ -483,7 +512,10 @@ impl PolymarketOrderbookStream {
 
                 // Log state transition
                 if reconnect_attempt > 0 {
-                    warn!("[PRICE_STREAM] Reconnecting (attempt {})", reconnect_attempt + 1);
+                    warn!(
+                        "[PRICE_STREAM] Reconnecting (attempt {})",
+                        reconnect_attempt + 1
+                    );
                 }
 
                 // Mark existing prices as disconnected before reconnect
@@ -501,7 +533,10 @@ impl PolymarketOrderbookStream {
                         let now_ms = chrono::Utc::now().timestamp_millis();
                         if reconnect_attempt > 0 {
                             last_price_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
-                            info!("[PRICE_STREAM] ✅ RECONNECTED successfully after {} attempts", reconnect_attempt);
+                            info!(
+                                "[PRICE_STREAM] ✅ RECONNECTED successfully after {} attempts",
+                                reconnect_attempt
+                            );
                         } else {
                             info!("[PRICE_STREAM] ✅ CONNECTED - WebSocket stream active");
                         }
@@ -535,21 +570,33 @@ impl PolymarketOrderbookStream {
                                         // Update prices from PriceChange
                                         let mut prices = prices_clone
                                             .entry(change_token_id.clone())
-                                            .or_insert_with(|| TokenPrices::new(change_token_id.clone()));
+                                            .or_insert_with(|| {
+                                                TokenPrices::new(change_token_id.clone())
+                                            });
 
                                         prices.best_bid = change.best_bid;
                                         prices.best_ask = change.best_ask;
                                         prices.last_trade = change.price.to_f64();
 
                                         // Calculate mid price
-                                        prices.mid_price = match (prices.best_bid, prices.best_ask) {
-                                            (Some(bid), Some(ask)) => Some((bid + ask) / Decimal::from(2)),
+                                        prices.mid_price = match (prices.best_bid, prices.best_ask)
+                                        {
+                                            (Some(bid), Some(ask)) => {
+                                                Some((bid + ask) / Decimal::from(2))
+                                            }
                                             (Some(bid), None) => Some(bid),
                                             (None, Some(ask)) => Some(ask),
                                             _ => None,
                                         };
 
-                                        prices.last_update_ms = price_change.timestamp;
+                                        // prices.last_update_ms = price_change.timestamp;
+                                        let local_now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis()
+                                            as i64;
+
+                                        prices.last_update_ms = local_now_ms;
                                         prices.last_ws_update_ms = price_change.timestamp; // Track WS updates separately
                                         prices.ws_connected = true;
                                         prices.consecutive_errors = 0;
@@ -568,16 +615,17 @@ impl PolymarketOrderbookStream {
                                             return;
                                         }
 
-                                        debug!("[PRICE_STREAM] 📥 WS update for {}: bid={:?} ask={:?}", 
-                                            change_token_id_hex, 
-                                            change.best_bid.and_then(|b| b.to_f64()), 
+                                        debug!(
+                                            "[PRICE_STREAM] 📥 WS update for {}: bid={:?} ask={:?}",
+                                            change_token_id_hex,
+                                            change.best_bid.and_then(|b| b.to_f64()),
                                             change.best_ask.and_then(|a| a.to_f64())
                                         );
                                     }
                                 }
                                 Some(Err(e)) => {
                                     error!("[PRICE_STREAM] ❌ Stream error: {}", e);
-                                    
+
                                     // Increment error count for all tokens
                                     for asset_id in &asset_ids_price {
                                         let token_id = asset_id.to_string();
@@ -607,7 +655,11 @@ impl PolymarketOrderbookStream {
                         }
                     }
                     Err(e) => {
-                        error!("[PRICE_STREAM] ❌ Connection failed (attempt {}): {}", reconnect_attempt + 1, e);
+                        error!(
+                            "[PRICE_STREAM] ❌ Connection failed (attempt {}): {}",
+                            reconnect_attempt + 1,
+                            e
+                        );
 
                         // Mark all tokens as disconnected and increment errors
                         for asset_id in &asset_ids_price {
@@ -623,18 +675,24 @@ impl PolymarketOrderbookStream {
 
                 // Check max reconnect attempts
                 if MAX_RECONNECT_ATTEMPTS > 0 && reconnect_attempt >= MAX_RECONNECT_ATTEMPTS {
-                    error!("[PRICE_STREAM] Max reconnect attempts ({}) reached", MAX_RECONNECT_ATTEMPTS);
+                    error!(
+                        "[PRICE_STREAM] Max reconnect attempts ({}) reached",
+                        MAX_RECONNECT_ATTEMPTS
+                    );
                     break;
                 }
 
                 // Exponential backoff before reconnect
-                info!("[PRICE_STREAM] ⏳ Waiting {}ms before reconnect", reconnect_delay_ms);
+                info!(
+                    "[PRICE_STREAM] ⏳ Waiting {}ms before reconnect",
+                    reconnect_delay_ms
+                );
                 tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
 
                 // Calculate next delay with exponential backoff
                 reconnect_delay_ms = std::cmp::min(
                     (reconnect_delay_ms as f64 * RECONNECT_BACKOFF_MULTIPLIER) as u64,
-                    MAX_RECONNECT_DELAY_MS
+                    MAX_RECONNECT_DELAY_MS,
                 );
                 reconnect_attempt += 1;
             }
@@ -666,7 +724,10 @@ impl PolymarketOrderbookStream {
                 let ws_client = WsClient::default();
 
                 if reconnect_attempt > 0 {
-                    warn!("[BOOK_STREAM] Reconnecting (attempt {})", reconnect_attempt + 1);
+                    warn!(
+                        "[BOOK_STREAM] Reconnecting (attempt {})",
+                        reconnect_attempt + 1
+                    );
                 }
 
                 // Mark tokens as disconnected
@@ -683,7 +744,10 @@ impl PolymarketOrderbookStream {
                         let now_ms = chrono::Utc::now().timestamp_millis();
                         if reconnect_attempt > 0 {
                             last_book_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
-                            info!("[BOOK_STREAM] ✅ RECONNECTED successfully after {} attempts", reconnect_attempt);
+                            info!(
+                                "[BOOK_STREAM] ✅ RECONNECTED successfully after {} attempts",
+                                reconnect_attempt
+                            );
                         } else {
                             info!("[BOOK_STREAM] ✅ CONNECTED - WebSocket stream active");
                         }
@@ -717,15 +781,27 @@ impl PolymarketOrderbookStream {
                                     let target_bid_price = prices.best_bid;
                                     let target_ask_price = prices.best_ask;
 
-                                    let bid_levels: Vec<OrderBookLevel> = book.bids.iter()
-                                        .map(|b| OrderBookLevel { price: b.price, size: b.size })
+                                    let bid_levels: Vec<OrderBookLevel> = book
+                                        .bids
+                                        .iter()
+                                        .map(|b| OrderBookLevel {
+                                            price: b.price,
+                                            size: b.size,
+                                        })
                                         .collect();
-                                    let ask_levels: Vec<OrderBookLevel> = book.asks.iter()
-                                        .map(|a| OrderBookLevel { price: a.price, size: a.size })
+                                    let ask_levels: Vec<OrderBookLevel> = book
+                                        .asks
+                                        .iter()
+                                        .map(|a| OrderBookLevel {
+                                            price: a.price,
+                                            size: a.size,
+                                        })
                                         .collect();
 
-                                    let bid_size = find_size_at_price(&bid_levels, target_bid_price);
-                                    let mut ask_size = find_size_at_price(&ask_levels, target_ask_price);
+                                    let bid_size =
+                                        find_size_at_price(&bid_levels, target_bid_price);
+                                    let mut ask_size =
+                                        find_size_at_price(&ask_levels, target_ask_price);
 
                                     if ask_size == 0.0 {
                                         if let Some(first_ask) = ask_levels.first() {
@@ -737,7 +813,9 @@ impl PolymarketOrderbookStream {
                                     prices.best_ask_size = ask_size;
 
                                     prices.mid_price = match (prices.best_bid, prices.best_ask) {
-                                        (Some(bid), Some(ask)) => Some((bid + ask) / Decimal::from(2)),
+                                        (Some(bid), Some(ask)) => {
+                                            Some((bid + ask) / Decimal::from(2))
+                                        }
                                         (Some(bid), None) => Some(bid),
                                         (None, Some(ask)) => Some(ask),
                                         _ => None,
@@ -793,7 +871,11 @@ impl PolymarketOrderbookStream {
                         }
                     }
                     Err(e) => {
-                        error!("[BOOK_STREAM] ❌ Connection failed (attempt {}): {}", reconnect_attempt + 1, e);
+                        error!(
+                            "[BOOK_STREAM] ❌ Connection failed (attempt {}): {}",
+                            reconnect_attempt + 1,
+                            e
+                        );
 
                         for asset_id in &asset_ids_book {
                             let token_id = asset_id.to_string();
@@ -811,12 +893,15 @@ impl PolymarketOrderbookStream {
                     break;
                 }
 
-                info!("[BOOK_STREAM] ⏳ Waiting {}ms before reconnect", reconnect_delay_ms);
+                info!(
+                    "[BOOK_STREAM] ⏳ Waiting {}ms before reconnect",
+                    reconnect_delay_ms
+                );
                 tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
 
                 reconnect_delay_ms = std::cmp::min(
                     (reconnect_delay_ms as f64 * RECONNECT_BACKOFF_MULTIPLIER) as u64,
-                    MAX_RECONNECT_DELAY_MS
+                    MAX_RECONNECT_DELAY_MS,
                 );
                 reconnect_attempt += 1;
             }
@@ -833,7 +918,10 @@ impl PolymarketOrderbookStream {
             let mut health_ticker = interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
             let mut tick_count = 0u32;
 
-            info!("[HEALTH_MONITOR] Started (interval: {}s)", HEALTH_CHECK_INTERVAL_SECS);
+            info!(
+                "[HEALTH_MONITOR] Started (interval: {}s)",
+                HEALTH_CHECK_INTERVAL_SECS
+            );
 
             loop {
                 health_ticker.tick().await;
@@ -841,7 +929,7 @@ impl PolymarketOrderbookStream {
 
                 // Get detailed status for each token
                 let token_statuses = stream_clone.detailed_status();
-                
+
                 // Count by state
                 let mut healthy_ws = 0;
                 let mut quiet_ws = 0;
@@ -867,7 +955,7 @@ impl PolymarketOrderbookStream {
 
                 // Log summary every 30s (3 ticks), or immediately if there are issues
                 let has_issues = disconnected > 0 || unhealthy > 0 || stale_ws > 0;
-                
+
                 if tick_count % 3 == 0 || has_issues {
                     if has_issues {
                         warn!(
@@ -877,14 +965,18 @@ impl PolymarketOrderbookStream {
                         );
                         // Log details for problematic tokens
                         for (short_id, detail) in &token_statuses {
-                            if detail.contains("STALE") || detail.contains("DISCONNECTED") || detail.contains("UNHEALTHY") {
+                            if detail.contains("STALE")
+                                || detail.contains("DISCONNECTED")
+                                || detail.contains("UNHEALTHY")
+                            {
                                 warn!("[HEALTH]   └─ {}: {}", short_id, detail);
                             }
                         }
                     } else {
                         info!(
                             "[HEALTH] ✅ ACTIVE_WS:{} QUIET_WS:{} | {}",
-                            healthy_ws, quiet_ws,
+                            healthy_ws,
+                            quiet_ws,
                             stream_clone.connection_status()
                         );
                     }
@@ -910,7 +1002,10 @@ impl PolymarketOrderbookStream {
             let mut ticker = interval(Duration::from_secs(REST_FALLBACK_INTERVAL_SECS));
             let mut last_log_ms = 0i64;
 
-            info!("[REST_FALLBACK] Started (interval: {}s, using midpoint + last_trade APIs)", REST_FALLBACK_INTERVAL_SECS);
+            info!(
+                "[REST_FALLBACK] Started (interval: {}s, using midpoint + last_trade APIs)",
+                REST_FALLBACK_INTERVAL_SECS
+            );
 
             loop {
                 ticker.tick().await;
@@ -931,7 +1026,7 @@ impl PolymarketOrderbookStream {
 
                     let should_fallback = {
                         if let Some(prices) = prices_fallback.get(token_id_str) {
-                            !prices.ws_connected 
+                            !prices.ws_connected
                                 || prices.is_unhealthy()
                                 || (now_ms - prices.last_update_ms) > WS_CONNECTED_AGE_MS
                         } else {
@@ -960,8 +1055,12 @@ impl PolymarketOrderbookStream {
                                 Ok(mid_resp) => {
                                     if let Some(mid) = mid_resp.mid.to_f64() {
                                         // Fetch last trade price from REST API
-                                        let last_req = LastTradePriceRequest::builder().token_id(token_id).build();
-                                        let last_trade = clob_client.last_trade_price(&last_req).await
+                                        let last_req = LastTradePriceRequest::builder()
+                                            .token_id(token_id)
+                                            .build();
+                                        let last_trade = clob_client
+                                            .last_trade_price(&last_req)
+                                            .await
                                             .ok()
                                             .and_then(|t| t.price.to_f64())
                                             .unwrap_or(0.0);
@@ -990,7 +1089,10 @@ impl PolymarketOrderbookStream {
                             .entry(token_id_str.clone())
                             .or_insert_with(|| TokenPrices::new(token_id_str.clone()));
 
-                        prices.mid_price = Some(rust_decimal::Decimal::from_f64(mid).unwrap_or(rust_decimal::Decimal::ZERO));
+                        prices.mid_price = Some(
+                            rust_decimal::Decimal::from_f64(mid)
+                                .unwrap_or(rust_decimal::Decimal::ZERO),
+                        );
                         prices.last_trade = Some(last_trade);
                         prices.last_update_ms = now_ms;
                         prices.api_fallback_count += 1;
@@ -1007,16 +1109,24 @@ impl PolymarketOrderbookStream {
                             debug!("[REST_FALLBACK] Failed to send: {:?}", e);
                         }
 
-                        let short_id = if token_id_str.len() > 8 { &token_id_str[..8] } else { &token_id_str };
+                        let short_id = if token_id_str.len() > 8 {
+                            &token_id_str[..8]
+                        } else {
+                            &token_id_str
+                        };
                         tokens_using_fallback.push(short_id.to_string());
 
-                        debug!("[REST_FALLBACK] 🌐 API update for {}: mid={:.4}", short_id, mid);
+                        debug!(
+                            "[REST_FALLBACK] 🌐 API update for {}: mid={:.4}",
+                            short_id, mid
+                        );
                     }
                 }
 
                 // Log fallback usage (but not too frequently - once per 30s)
                 if !tokens_using_fallback.is_empty() && (now_ms - last_log_ms) > 30000 {
-                    warn!("[REST_FALLBACK] 🌐 Using API for {} tokens: [{}] (total API calls: {})",
+                    warn!(
+                        "[REST_FALLBACK] 🌐 Using API for {} tokens: [{}] (total API calls: {})",
                         tokens_using_fallback.len(),
                         tokens_using_fallback.join(", "),
                         total_api_calls.load(Ordering::Relaxed)
@@ -1079,15 +1189,15 @@ mod tests {
     #[test]
     fn test_connection_detail() {
         let mut prices = TokenPrices::new("test".to_string());
-        
+
         // Disconnected
         assert!(prices.connection_detail().contains("DISCONNECTED"));
-        
+
         // Connected with recent WS data
         prices.ws_connected = true;
         prices.last_ws_update_ms = chrono::Utc::now().timestamp_millis();
         assert!(prices.connection_detail().contains("HEALTHY_WS"));
-        
+
         // Quiet but connected
         prices.last_ws_update_ms = chrono::Utc::now().timestamp_millis() - 30000;
         assert!(prices.connection_detail().contains("QUIET_WS"));

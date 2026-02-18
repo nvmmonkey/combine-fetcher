@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use combine_fetcher::api::binance::BinanceDataManager;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
+use combine_fetcher::api::rtds_tracker::{RtdsSnapshot, RtdsTracker};
 use combine_fetcher::{
     CSV_RECORD_INTERVAL_SEC, GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
     MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_INTERVAL_MS,
@@ -88,6 +89,20 @@ pub struct CsvRecord {
     // Polymarket spreads
     pub yes_spread_bps: f64,
     pub no_spread_bps: f64,
+
+    // === RTDS PRICE FEED COLUMNS (v2, clock-safe) ===
+    pub rtds_binance_price: f64,
+    pub rtds_chainlink_price: f64,
+    // ✅ Clock-safe (pure price math — USE FOR TRADING)
+    pub rtds_binance_dev_bps: f64,
+    pub rtds_chainlink_dev_bps: f64,
+    pub rtds_price_advantage_bps: f64,
+    pub rtds_chainlink_binance_spread_bps: f64,
+    // ⚠️ Approximate (~50ms NTP error — USE FOR MONITORING)
+    pub rtds_binance_lag_ms: i64,
+    pub rtds_chainlink_lag_ms: i64,
+    pub rtds_binance_stale_ms: i64,
+    pub rtds_chainlink_stale_ms: i64,
 }
 
 impl CsvRecord {
@@ -102,7 +117,12 @@ impl CsvRecord {
         binance_bid,binance_ask,binance_spread_bps,\
         vol_1sec,vol_5sec,vol_13sec,vol_34sec,vol_89sec,volatility_regime,\
         volume_1sec,volume_spike,signal_quality,trade_confidence,vol_data_source,\
-        yes_spread_bps,no_spread_bps"
+        yes_spread_bps,no_spread_bps,\
+        rtds_binance_price,rtds_chainlink_price,\
+        rtds_binance_dev_bps,rtds_chainlink_dev_bps,\
+        rtds_price_advantage_bps,rtds_chainlink_binance_spread_bps,\
+        rtds_binance_lag_ms,rtds_chainlink_lag_ms,\
+        rtds_binance_stale_ms,rtds_chainlink_stale_ms"
     }
 
     pub fn to_csv_line(&self) -> String {
@@ -117,7 +137,8 @@ impl CsvRecord {
             {:.2},{:.2},{:.4},\
             {:.6},{:.6},{:.6},{:.6},{:.6},{},\
             {:.2},{},{},{:.4},{},\
-            {:.4},{:.4}",
+            {:.4},{:.4},\
+            {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{}",
             // Original columns
             self.timestamp,
             self.market_slug,
@@ -167,7 +188,17 @@ impl CsvRecord {
             self.vol_data_source,
             // New spread columns
             self.yes_spread_bps,
-            self.no_spread_bps
+            self.no_spread_bps,
+            self.rtds_binance_price,
+            self.rtds_chainlink_price,
+            self.rtds_binance_dev_bps,
+            self.rtds_chainlink_dev_bps,
+            self.rtds_price_advantage_bps,
+            self.rtds_chainlink_binance_spread_bps,
+            self.rtds_binance_lag_ms,
+            self.rtds_chainlink_lag_ms,
+            self.rtds_binance_stale_ms,
+            self.rtds_chainlink_stale_ms,
         )
     }
 }
@@ -182,12 +213,8 @@ fn generate_hourly_filename(base_path: &str, hour_time: DateTime<Utc>) -> String
     let path = Path::new(base_path);
 
     // Extract file stem and extension
-    let stem = path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("data");
-    let extension = path.extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("csv");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("data");
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("csv");
 
     // Format: {stem}_{YYYY-MM-DD}_{HH}.{ext}
     let timestamp = hour_time.format("%Y-%m-%d_%H");
@@ -196,10 +223,7 @@ fn generate_hourly_filename(base_path: &str, hour_time: DateTime<Utc>) -> String
 
 /// Creates a new hourly CSV file with header
 fn open_new_hourly_file(path: &str) -> Result<BufWriter<std::fs::File>> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(path)?;
+    let file = OpenOptions::new().create(true).write(true).open(path)?;
 
     let mut writer = BufWriter::with_capacity(64 * 1024, file);
 
@@ -413,7 +437,7 @@ async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
         if let (Some(ui), Some(di)) = (up_idx, down_idx) {
             return Ok(MarketInfo {
                 unique_id,
-                slug,  // Use the locally constructed value to ensure consistency with unique_id
+                slug, // Use the locally constructed value to ensure consistency with unique_id
                 condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
                 yes_token_id: tokens[ui].clone(),
                 no_token_id: tokens[di].clone(),
@@ -470,7 +494,7 @@ async fn fetch_next_market_after(
         if let (Some(ui), Some(di)) = (up_idx, down_idx) {
             return Ok(MarketInfo {
                 unique_id,
-                slug,  // Use the locally constructed value to ensure consistency with unique_id
+                slug, // Use the locally constructed value to ensure consistency with unique_id
                 condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
                 yes_token_id: tokens[ui].clone(),
                 no_token_id: tokens[di].clone(),
@@ -504,7 +528,10 @@ async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) 
     let mut backoff_ms = STRIKE_RETRY_INTERVAL_MS;
 
     loop {
-        debug!("Attempting strike fetch (attempt {}) for {}", attempt, market.unique_id);
+        debug!(
+            "Attempting strike fetch (attempt {}) for {}",
+            attempt, market.unique_id
+        );
 
         match client
             .get(&url)
@@ -633,7 +660,10 @@ async fn main() -> Result<()> {
     }
 
     // Fetch strike with infinite retry BEFORE starting data collection
-    println!("⏳ Fetching strike price for {}...", current_market.unique_id);
+    println!(
+        "⏳ Fetching strike price for {}...",
+        current_market.unique_id
+    );
     println!("ℹ️  NOTE: Will retry indefinitely until strike price is available (exponential backoff, max 30s)");
     let strike = fetch_strike_with_retry(&http, &current_market).await?;
     current_market.strike_price = Some(strike);
@@ -657,7 +687,13 @@ async fn main() -> Result<()> {
     });
 
     println!("✅ Polymarket connected");
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Setup RTDS price feed tracker
+    let mut rtds_tracker = RtdsTracker::new();
+    rtds_tracker.start();
+    println!("✅ RTDS tracker connected (Binance relay + Chainlink oracle)");
+    tokio::time::sleep(Duration::from_secs(2)).await; // Wait for first RTDS updates
 
     // Initialize hourly CSV writer
     let mut csv_writer = HourlyCsvWriter::new(csv_path.clone());
@@ -741,7 +777,7 @@ async fn main() -> Result<()> {
 
         // Calculate latency differential
         let poly_avg_update = (poly_yes_update_ms + poly_no_update_ms) / 2;
-        let latency_ms = binance_update_ms - poly_avg_update;
+        let latency_ms = binance_update_ms - poly_avg_update; //depreciated
 
         // Get Binance bid/ask
         let (binance_bid, binance_ask) = binance_manager
@@ -806,6 +842,9 @@ async fn main() -> Result<()> {
         let yes_spread = calculate_spread_bps(yes_bid, yes_ask);
         let no_spread = calculate_spread_bps(no_bid, no_ask);
 
+        // Get RTDS snapshot (Polymarket's price feed view)
+        let rtds = rtds_tracker.get_snapshot(snapshot.spot_price, binance_update_ms);
+
         // Build record (backward compatible order)
         let record = CsvRecord {
             // ORIGINAL 23 columns
@@ -854,6 +893,18 @@ async fn main() -> Result<()> {
             vol_data_source: vol_data_source.clone(),
             yes_spread_bps: yes_spread,
             no_spread_bps: no_spread,
+
+            // RTDS price feed columns
+            rtds_binance_price: rtds.rtds_binance_price,
+            rtds_chainlink_price: rtds.rtds_chainlink_price,
+            rtds_binance_dev_bps: rtds.rtds_binance_dev_bps,
+            rtds_chainlink_dev_bps: rtds.rtds_chainlink_dev_bps,
+            rtds_price_advantage_bps: rtds.rtds_price_advantage_bps,
+            rtds_chainlink_binance_spread_bps: rtds.rtds_chainlink_binance_spread_bps,
+            rtds_binance_lag_ms: rtds.rtds_binance_lag_ms,
+            rtds_chainlink_lag_ms: rtds.rtds_chainlink_lag_ms,
+            rtds_binance_stale_ms: rtds.rtds_binance_stale_ms,
+            rtds_chainlink_stale_ms: rtds.rtds_chainlink_stale_ms,
         };
 
         // Write to current hourly file
@@ -862,14 +913,18 @@ async fn main() -> Result<()> {
         tick += 1;
 
         // P0 FIX: Periodic 1min buffer refresh (every ~5 minutes)
-        if tick % (300 * 90) == 0 { // Every ~5 minutes at 90 ticks/sec
+        if tick % (300 * 90) == 0 {
+            // Every ~5 minutes at 90 ticks/sec
             let _ = binance_manager.bootstrap_volatility("BTCUSDT", 10).await;
         }
 
         if tick % 100 == 0 {
             info!(
                 "#{} Market={} TTX={:.1}m | Hour={:02}",
-                tick, current_market.unique_id, ttx, now.hour()
+                tick,
+                current_market.unique_id,
+                ttx,
+                now.hour()
             );
             info!(
                 "yesIDX={} | noIDX={}",
@@ -891,6 +946,20 @@ async fn main() -> Result<()> {
                 "Volume[1s/1m]={:.0}/{:.0} | Spike={} | YesSpr={:.2}bps | NoSpr={:.2}bps | Q*={} | Conf={:.2}",
                 snapshot.volume_1sec, snapshot.volume_1min, snapshot.volume_spike,
                 yes_spread, no_spread, snapshot.signal_quality, snapshot.trade_confidence
+            );
+
+            // RTDS feed health
+            let (rtds_b_count, rtds_c_count) = rtds_tracker.update_counts();
+            info!(
+                "RTDS: B_dev={:.1}bps C_dev={:.1}bps adv={:.1}bps C-B_spread={:.1}bps | stale=B:{}ms/C:{}ms | n=B:{}/C:{}",
+                rtds.rtds_binance_dev_bps,
+                rtds.rtds_chainlink_dev_bps,
+                rtds.rtds_price_advantage_bps,
+                rtds.rtds_chainlink_binance_spread_bps,
+                rtds.rtds_binance_stale_ms,
+                rtds.rtds_chainlink_stale_ms,
+                rtds_b_count,
+                rtds_c_count,
             );
         }
 
@@ -924,7 +993,10 @@ async fn main() -> Result<()> {
                         consecutive_fetch_failures = 0;
 
                         // Fetch strike for the new market (infinite retry, no fallback)
-                        println!("⏳ Fetching strike price for {}...", current_market.unique_id);
+                        println!(
+                            "⏳ Fetching strike price for {}...",
+                            current_market.unique_id
+                        );
                         let strike = fetch_strike_with_retry(&http, &current_market).await?;
                         current_market.strike_price = Some(strike);
                         current_market.strike_fetched = true;
@@ -937,14 +1009,18 @@ async fn main() -> Result<()> {
                         ];
                         let mut new_rx = poly_stream.clone().stream(new_token_ids).await?;
 
-                        tokio::spawn(async move { while let Some(_update) = new_rx.recv().await {} });
+                        tokio::spawn(
+                            async move { while let Some(_update) = new_rx.recv().await {} },
+                        );
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                     Err(e) => {
                         consecutive_fetch_failures += 1;
-                        warn!("⚠️ Failed to fetch next market (attempt {}/{}): {}",
-                            consecutive_fetch_failures, MAX_CONSECUTIVE_FETCH_FAILURES, e);
+                        warn!(
+                            "⚠️ Failed to fetch next market (attempt {}/{}): {}",
+                            consecutive_fetch_failures, MAX_CONSECUTIVE_FETCH_FAILURES, e
+                        );
 
                         if consecutive_fetch_failures >= MAX_CONSECUTIVE_FETCH_FAILURES {
                             error!("❌ Too many consecutive fetch failures ({}). Exiting to prevent tight loop.",
@@ -958,8 +1034,10 @@ async fn main() -> Result<()> {
                 }
             } else if time_since_last_fetch_attempt < FETCH_RETRY_COOLDOWN_MS {
                 // In cooldown period - skip fetch attempt this iteration
-                debug!("⏸️  In cooldown period ({}ms remaining until retry)",
-                    FETCH_RETRY_COOLDOWN_MS - time_since_last_fetch_attempt);
+                debug!(
+                    "⏸️  In cooldown period ({}ms remaining until retry)",
+                    FETCH_RETRY_COOLDOWN_MS - time_since_last_fetch_attempt
+                );
             }
         }
     }

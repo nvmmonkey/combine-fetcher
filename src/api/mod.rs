@@ -5,6 +5,8 @@
 
 pub mod binance;
 pub mod polymarket;
+pub mod rtds_tracker;
 
 pub use binance::{BinanceDataManager, BinancePrice};
 pub use polymarket::{PolymarketOrderbookStream, PolyPriceUpdate, TokenPrices};
+pub use rtds_tracker::{RtdsTracker, RtdsSnapshot};
