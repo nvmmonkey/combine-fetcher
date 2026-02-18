@@ -1,21 +1,15 @@
-// btc_dashboard.rs  — Real-time BTC/Polymarket dashboard (no persistent CSV)
+// btc_dashboard.rs  — Real-time BTC/Polymarket dashboard  v2 (fixed)
 //
-// cargo run --bin btc_dashboard -- [duration_secs]
-// Press q or Esc to exit
-//
-// Layout:
-//   ┌─ HEADER ──────────────────────────────────────────────────────────────┐
-//   │  BTC price · 1m/24h Δ · slug · TTX progress gauge · outcome deviation │
-//   ├─ ORDER BOOK ──────────────┬─ FLOW · CVD · VOLUME ─────────────────────┤
-//   │  OBI bar · YES/NO/BINANCE │  CVD bars · Vol · Volatility regime       │
-//   ├─ TECHNICALS · RTDS ───────┼─ GREEKS · LATENCY ────────────────────────┤
-//   │  RSI · MACD · EMA · VWAP  │  Δ Γ ν Θ · fixed relative latency        │
-//   ├─ OUTCOME ─────────────────┴─ SIGNAL STRENGTH ────────────────────────┤
-//   │  price vs strike · deviation · resolved outcome                        │
-//   └────────────────────────────────────────────────────────────────────────┘
+// FIXES:
+//   1. Header layout: removed nested split — render all header content in one
+//      Paragraph, TTX gauge rendered in the outer vertical split row below it.
+//   2. latency_binance_poly_ms: clamped + guarded against cross-clock garbage.
+//   3. All super-large numbers guarded with .clamp() / sanity checks.
+//   4. snapshot field names verified against multi_market_logger_hourly.rs.
+//   5. pct_above_strike guarded against div-by-zero on startup.
 
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -23,38 +17,45 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Gauge, Paragraph},
     Frame, Terminal,
 };
 use rust_decimal::prelude::*;
 use std::{
     collections::VecDeque,
     fs,
-    io,
+    io::{self, Write},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{info, warn};
 
 use combine_fetcher::api::binance::BinanceDataManager;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
-use combine_fetcher::api::rtds_tracker::{RtdsSnapshot, RtdsTracker};
+use combine_fetcher::api::rtds_tracker::RtdsTracker;
 use combine_fetcher::{
-    CSV_RECORD_INTERVAL_SEC, GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
+    GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
     MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_INTERVAL_MS,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Types (identical to logger — no duplication of SDK types)
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// BPS mode threshold for RTDS stale detection (mirrors backtest default)
+const RTDS_ADV_THRESH: f64 = 3.0;
+/// Max sane latency to display — anything above is cross-clock garbage
+const MAX_SANE_LATENCY_MS: i64 = 10_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Market info
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct MarketInfo {
-    pub unique_id: String,
     pub slug: String,
     pub condition_id: String,
     pub yes_token_id: String,
@@ -65,106 +66,195 @@ pub struct MarketInfo {
     pub strike_fetched: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Greeks {
-    pub delta: f64,
-    pub gamma: f64,
-    pub vega: f64,
-    pub theta: f64,
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Greeks
+// ─────────────────────────────────────────────────────────────────────────────
 
-fn calculate_spread_bps(bid: f64, ask: f64) -> f64 {
-    if bid <= 0.0 || ask <= bid { return 0.0; }
-    let mid = (bid + ask) / 2.0;
-    if mid <= 0.0 { return 0.0; }
-    ((ask - bid) / mid) * 10_000.0
-}
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Greeks { pub delta: f64, pub gamma: f64, pub vega: f64, pub theta: f64 }
 
 fn calculate_greeks(spot: f64, strike: f64, ttx_min: f64, vol: f64) -> Greeks {
     if ttx_min <= 0.01 || vol <= 0.0 || spot <= 0.0 || strike <= 0.0 {
         return Greeks { delta: if spot >= strike { 1.0 } else { 0.0 }, ..Default::default() };
     }
     let t = ttx_min / MINUTES_PER_YEAR;
-    let sqrt_t = t.sqrt();
-    let d1 = ((spot / strike).ln() + (vol * vol / 2.0) * t) / (vol * sqrt_t);
-    let d2 = ((spot / strike).ln() - (vol * vol / 2.0) * t) / (vol * sqrt_t);
-    let norm_pdf = |x: f64| (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
-    let npd2 = norm_pdf(d2);
+    let st = t.sqrt();
+    let d1 = ((spot / strike).ln() + (vol * vol / 2.0) * t) / (vol * st);
+    let d2 = ((spot / strike).ln() - (vol * vol / 2.0) * t) / (vol * st);
+    let npdf = |x: f64| (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let nd2 = npdf(d2);
     Greeks {
-        delta: (npd2 / (spot * vol * sqrt_t)).clamp(0.0, 1.0),
-        gamma: (npd2 * d1 / (spot * spot * vol * vol * t)).clamp(-1e6, 1e6),
-        vega:  (npd2 * sqrt_t * 0.01).clamp(-1e6, 1e6),
-        theta: (-(spot * npd2 * vol) / (2.0 * sqrt_t) / 365.0).clamp(-1e6, 1e6),
+        delta: (nd2 / (spot * vol * st)).clamp(0.0, 1.0),
+        gamma: (nd2 * d1 / (spot * spot * vol * vol * t)).clamp(-1e6, 1e6),
+        vega:  (nd2 * st * 0.01).clamp(-1e6, 1e6),
+        theta: (-(spot * nd2 * vol) / (2.0 * st) / 365.0).clamp(-1e6, 1e6),
     }
 }
 
-pub fn truncate_id(id: &str, first: usize, last: usize) -> String {
-    let len = id.len();
-    if len <= first + last { return id.to_string(); }
-    format!("{}…{}", &id[..first], &id[len - last..])
+fn spread_bps(bid: f64, ask: f64) -> f64 {
+    if bid <= 0.0 || ask <= bid { return 0.0; }
+    let mid = (bid + ask) / 2.0;
+    if mid <= 0.0 { return 0.0; }
+    ((ask - bid) / mid) * 10_000.0
+}
+
+/// Polymarket fee % — mirrors backtest poly_fee_rate exactly
+fn poly_fee_pct(price: f64) -> f64 {
+    if price <= 0.0 || price >= 1.0 { return 0.0; }
+    (6.25 * price * (1.0 - price)).min(1.5625)
+}
+
+/// Z-score: (btc - strike) / (strike × vol × √T_years)
+fn z_score(spot: f64, strike: f64, vol: f64, ttx_min: f64) -> (f64, f64, &'static str) {
+    if strike <= 0.0 || vol <= 0.0 || ttx_min <= 0.0 { return (0.0, 0.0, "YES"); }
+    let t = ttx_min / (365.25 * 24.0 * 60.0);
+    let em = strike * vol * t.sqrt().max(1e-12);
+    if em < 1e-10 { return (0.0, 0.0, "YES"); }
+    let z = (spot - strike) / em;
+    (z, z.abs(), if z > 0.0 { "YES" } else { "NO" })
+}
+
+/// Expected move as % of strike: vol × √T × 100
+fn exp_move_pct(vol: f64, ttx_min: f64) -> f64 {
+    let t = ttx_min / (365.25 * 24.0 * 60.0);
+    vol * t.sqrt() * 100.0
+}
+
+/// Regime classification — mirrors backtest classify_regime
+fn classify_regime(yes_ask: f64) -> &'static str {
+    if      yes_ask >= 0.85 { "YES_EXTREME" }
+    else if yes_ask >= 0.70 { "YES_TREND" }
+    else if yes_ask <= 0.15 { "NO_EXTREME" }
+    else if yes_ask <= 0.30 { "NO_TREND" }
+    else                    { "OSCILLATING" }
+}
+
+/// Clamp a latency value: if outside plausible range, return None (displays as "---")
+fn sane_latency(ms: i64) -> Option<i64> {
+    if ms.abs() > MAX_SANE_LATENCY_MS { None } else { Some(ms) }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Market fetchers (identical logic to logger)
+// Multi-signal confidence (mirrors backtest compute_dir_confidence)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, serde::Deserialize)]
-struct PolymarketStrikeResponse {
-    #[serde(rename = "openPrice")]
-    open_price: Option<f64>,
+#[derive(Debug, Clone, Default)]
+struct Confidence {
+    pub score:      f64,  // 0..1
+    pub votes:      u8,   // out of 5
+    pub avg_z_vote: bool,
+    pub vel_vote:   bool,
+    pub asym_vote:  bool,
+    pub open_vote:  bool,
+    pub fade_vote:  bool,
+    pub fade_ratio: f64,
 }
+
+fn compute_confidence(z_hist: &VecDeque<f64>, is_yes: bool, opening_dev: f64) -> Confidence {
+    if z_hist.len() < 20 { return Confidence::default(); }
+    let arr: Vec<f64> = z_hist.iter().copied().collect();
+    let n = arr.len();
+    let cur_z = *arr.last().unwrap();
+    let mut votes = 0u8;
+
+    let avg_z     = arr.iter().sum::<f64>() / n as f64;
+    let avg_agree = (avg_z > 0.0) == is_yes;
+    if avg_agree { votes += 1; }
+
+    let lookback = (n / 5).max(20).min(n);
+    let rec = &arr[n - lookback..];
+    let z_vel = if rec.len() > 5 {
+        let xm = (rec.len() - 1) as f64 / 2.0;
+        let ym = rec.iter().sum::<f64>() / rec.len() as f64;
+        let num: f64 = rec.iter().enumerate().map(|(i, &y)| (i as f64 - xm) * (y - ym)).sum();
+        let den: f64 = rec.iter().enumerate().map(|(i, _)| { let d = i as f64 - xm; d * d }).sum();
+        if den > 1e-10 { num / den } else { 0.0 }
+    } else { 0.0 };
+    let vel_agree = (z_vel > 0.0) == is_yes;
+    if vel_agree { votes += 1; }
+
+    let pct_pos  = arr.iter().filter(|&&z| z > 0.0).count() as f64 / n as f64;
+    let asym_ok  = (pct_pos > 0.5) == is_yes;
+    if asym_ok { votes += 1; }
+
+    let open_ok  = (opening_dev > 0.0) == is_yes;
+    if open_ok { votes += 1; }
+
+    let max_abs  = arr.iter().map(|z| z.abs()).fold(0.0_f64, f64::max);
+    let fade     = if max_abs > 0.1 { cur_z.abs() / max_abs } else { 1.0 };
+    let fade_ok  = fade >= 0.30;
+    if fade_ok { votes += 1; }
+
+    Confidence {
+        score: votes as f64 / 5.0,
+        votes,
+        avg_z_vote: avg_agree,
+        vel_vote:   vel_agree,
+        asym_vote:  asym_ok,
+        open_vote:  open_ok,
+        fade_vote:  fade_ok,
+        fade_ratio: fade,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Market fetchers
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct PolyStrike { #[serde(rename = "openPrice")] open_price: Option<f64> }
 
 async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
     let now = Utc::now().timestamp();
     let pos = now % MARKET_WINDOW_SECONDS;
-    let window_start = if pos < 60 {
+    let ws  = if pos < 60 {
         ((now / MARKET_WINDOW_SECONDS) - 1) * MARKET_WINDOW_SECONDS
     } else {
         (now / MARKET_WINDOW_SECONDS) * MARKET_WINDOW_SECONDS
     };
-    let window_end = window_start + MARKET_WINDOW_SECONDS;
-    let slug = format!("btc-updown-15m-{}", window_start);
-    let url  = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
-    let resp = client.get(&url).timeout(Duration::from_secs(HTTP_TIMEOUT_SECS)).send().await?;
-    if !resp.status().is_success() { return Err(anyhow!("Market fetch failed: {}", resp.status())); }
-    let data: serde_json::Value = resp.json().await?;
-    let markets = data["markets"].as_array().ok_or_else(|| anyhow!("No markets"))?;
-    for m in markets {
+    let slug = format!("btc-updown-15m-{}", ws);
+    let data: serde_json::Value = client
+        .get(format!("{}/events/slug/{}", GAMMA_API_URL, slug))
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS)).send().await?.json().await?;
+    for m in data["markets"].as_array().ok_or_else(|| anyhow!("no markets"))? {
         if !m["active"].as_bool().unwrap_or(false) { continue; }
         let outcomes: Vec<String> = serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
         let tokens:   Vec<String> = serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
         if outcomes.len() != 2 || tokens.len() != 2 { continue; }
-        if let (Some(ui), Some(di)) = (outcomes.iter().position(|o| o == "Up"), outcomes.iter().position(|o| o == "Down")) {
+        if let (Some(ui), Some(di)) = (
+            outcomes.iter().position(|o| o == "Up"),
+            outcomes.iter().position(|o| o == "Down"),
+        ) {
             return Ok(MarketInfo {
-                unique_id: slug.clone(), slug,
-                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
+                slug, condition_id: m["conditionId"].as_str().unwrap_or("").into(),
                 yes_token_id: tokens[ui].clone(), no_token_id: tokens[di].clone(),
-                window_start, window_end, strike_price: None, strike_fetched: false,
+                window_start: ws, window_end: ws + MARKET_WINDOW_SECONDS,
+                strike_price: None, strike_fetched: false,
             });
         }
     }
     Err(anyhow!("No valid BTC market"))
 }
 
-async fn fetch_next_market_after(client: &reqwest::Client, current_ws: i64) -> Result<MarketInfo> {
-    let next_ws = current_ws + MARKET_WINDOW_SECONDS;
-    let slug = format!("btc-updown-15m-{}", next_ws);
-    let url  = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
-    let resp = client.get(&url).timeout(Duration::from_secs(HTTP_TIMEOUT_SECS)).send().await?;
-    if !resp.status().is_success() { return Err(anyhow!("Market fetch failed: {}", resp.status())); }
-    let data: serde_json::Value = resp.json().await?;
-    let markets = data["markets"].as_array().ok_or_else(|| anyhow!("No markets"))?;
-    for m in markets {
+async fn fetch_next_market_after(client: &reqwest::Client, ws: i64) -> Result<MarketInfo> {
+    let nws  = ws + MARKET_WINDOW_SECONDS;
+    let slug = format!("btc-updown-15m-{}", nws);
+    let data: serde_json::Value = client
+        .get(format!("{}/events/slug/{}", GAMMA_API_URL, slug))
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS)).send().await?.json().await?;
+    for m in data["markets"].as_array().ok_or_else(|| anyhow!("no markets"))? {
         if !m["active"].as_bool().unwrap_or(false) { continue; }
         let outcomes: Vec<String> = serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
         let tokens:   Vec<String> = serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
         if outcomes.len() != 2 || tokens.len() != 2 { continue; }
-        if let (Some(ui), Some(di)) = (outcomes.iter().position(|o| o == "Up"), outcomes.iter().position(|o| o == "Down")) {
+        if let (Some(ui), Some(di)) = (
+            outcomes.iter().position(|o| o == "Up"),
+            outcomes.iter().position(|o| o == "Down"),
+        ) {
             return Ok(MarketInfo {
-                unique_id: slug.clone(), slug,
-                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
+                slug, condition_id: m["conditionId"].as_str().unwrap_or("").into(),
                 yes_token_id: tokens[ui].clone(), no_token_id: tokens[di].clone(),
-                window_start: next_ws, window_end: next_ws + MARKET_WINDOW_SECONDS,
+                window_start: nws, window_end: nws + MARKET_WINDOW_SECONDS,
                 strike_price: None, strike_fetched: false,
             });
         }
@@ -172,69 +262,59 @@ async fn fetch_next_market_after(client: &reqwest::Client, current_ws: i64) -> R
     Err(anyhow!("No valid next BTC market"))
 }
 
-async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) -> Result<f64> {
-    let start = DateTime::from_timestamp(market.window_start, 0).ok_or_else(|| anyhow!("Bad ts"))?;
-    let end   = DateTime::from_timestamp(market.window_end,   0).ok_or_else(|| anyhow!("Bad ts"))?;
-    let url = format!(
+async fn fetch_strike(client: &reqwest::Client, m: &MarketInfo) -> Result<f64> {
+    let start = DateTime::from_timestamp(m.window_start, 0).ok_or_else(|| anyhow!("ts"))?;
+    let end   = DateTime::from_timestamp(m.window_end,   0).ok_or_else(|| anyhow!("ts"))?;
+    let url   = format!(
         "{}/crypto-price?symbol=BTC&eventStartTime={}&variant=fifteen&endDate={}",
         POLY_CRYPTO_API_URL,
         start.format("%Y-%m-%dT%H:%M:%SZ"),
-        end.format("%Y-%m-%dT%H:%M:%SZ")
+        end.format("%Y-%m-%dT%H:%M:%SZ"),
     );
-    let mut backoff_ms = STRIKE_RETRY_INTERVAL_MS;
+    let mut backoff = STRIKE_RETRY_INTERVAL_MS;
     loop {
-        if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(HTTP_TIMEOUT_SECS)).send().await {
-            if resp.status().is_success() {
-                if let Ok(data) = resp.json::<PolymarketStrikeResponse>().await {
-                    if let Some(price) = data.open_price { return Ok(price); }
+        if let Ok(r) = client.get(&url).timeout(Duration::from_secs(HTTP_TIMEOUT_SECS)).send().await {
+            if r.status().is_success() {
+                if let Ok(d) = r.json::<PolyStrike>().await {
+                    if let Some(p) = d.open_price { return Ok(p); }
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-        backoff_ms = (backoff_ms * 2).min(30_000);
+        tokio::time::sleep(Duration::from_millis(backoff)).await;
+        backoff = (backoff * 2).min(30_000);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Temp CSV (slug-keyed, auto-delete on new slug)
+// Temp CSV
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct TempCsvWriter {
-    current_slug: String,
-    current_path: PathBuf,
-    writer: Option<std::io::BufWriter<std::fs::File>>,
-}
-use std::io::Write;
-
-impl TempCsvWriter {
-    fn new() -> Self {
-        Self { current_slug: String::new(), current_path: PathBuf::new(), writer: None }
-    }
-    fn ensure_slug(&mut self, slug: &str, now: &DateTime<Utc>) -> Result<()> {
-        if slug == self.current_slug { return Ok(()); }
-        if let Some(mut w) = self.writer.take() { let _ = w.flush(); }
-        if self.current_path.exists() { let _ = fs::remove_file(&self.current_path); }
-        let path = PathBuf::from(format!("temp_btc_{}_{}.csv", slug, now.format("%Y-%m-%dT%H-%M-%S")));
-        let file = std::fs::OpenOptions::new().create(true).write(true).open(&path)?;
-        let mut w = std::io::BufWriter::with_capacity(32 * 1024, file);
-        writeln!(w, "timestamp,market_slug,binance_price,yes_bid,yes_ask,no_bid,no_ask,\
-                      strike_price,ttx_min,delta_yes,realized_volatility,signal_quality,\
-                      trade_confidence,price_vs_strike_pct,outcome_projection")?;
-        self.current_slug = slug.to_string();
-        self.current_path = path;
-        self.writer = Some(w);
+struct TempCsv { slug: String, path: PathBuf, w: Option<io::BufWriter<fs::File>> }
+impl TempCsv {
+    fn new() -> Self { Self { slug: String::new(), path: PathBuf::new(), w: None } }
+    fn ensure(&mut self, slug: &str, now: &DateTime<Utc>) -> Result<()> {
+        if slug == self.slug { return Ok(()); }
+        if let Some(mut w) = self.w.take() { let _ = w.flush(); }
+        if self.path.exists() { let _ = fs::remove_file(&self.path); }
+        let p = PathBuf::from(format!("temp_dash_{}_{}.csv", slug, now.format("%H%M%S")));
+        let f = fs::OpenOptions::new().create(true).write(true).open(&p)?;
+        let mut w = io::BufWriter::with_capacity(32 * 1024, f);
+        writeln!(w, "timestamp,slug,price,yes_ask,no_ask,strike,ttx_min,z_score,abs_z,\
+                      z_dir,exp_move_pct,regime,conf_score,conf_votes,rtds_stale,\
+                      book_stale_bps,obi,cvd_1m,cvd_5m,delta,vol,dev_usd,dev_pct")?;
+        self.slug = slug.into(); self.path = p; self.w = Some(w);
         Ok(())
     }
-    fn write_row(&mut self, r: &DashRow) -> Result<()> {
-        if let Some(ref mut w) = self.writer {
+    fn write(&mut self, r: &Row) -> Result<()> {
+        if let Some(ref mut w) = self.w {
             writeln!(w,
-                "{},{},{:.2},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.8},{:.6},{},{:.4},{:.4},{}",
-                r.timestamp, r.slug, r.binance_price,
-                r.yes_bid, r.yes_ask, r.no_bid, r.no_ask,
-                r.strike_price, r.ttx_min, r.delta_yes, r.realized_vol,
-                r.signal_quality, r.trade_confidence,
-                r.price_vs_strike_pct,
-                r.outcome_projection,
+                "{},{},{:.2},{:.4},{:.4},{:.2},{:.2},{:+.4},{:.4},{},{:.5},{},{:.2},{},{},\
+                 {:.2},{:+.4},{},{},{:.8},{:.6},{:+.2},{:+.4}",
+                r.ts, r.slug, r.btc, r.yes_ask, r.no_ask, r.strike, r.ttx,
+                r.z, r.abs_z, r.z_dir, r.exp_move, r.regime,
+                r.conf.score, r.conf.votes, r.rtds_stale, r.rtds_adv,
+                r.obi, r.cvd1m as i64, r.cvd5m as i64,
+                r.delta, r.vol, r.dev_usd, r.dev_pct,
             )?;
             w.flush()?;
         }
@@ -243,707 +323,730 @@ impl TempCsvWriter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Dashboard state
+// Dashboard state row
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
-pub struct DashRow {
-    // timing
-    pub timestamp: String,
-    pub slug: String,
-    pub ttx_min: f64,
-    pub ttx_total_min: f64,   // full window duration (15.0)
-    pub time_to_open: i64,
-    pub market_resolved: bool,
-    pub outcome: String,
-    pub window_start: i64,
-    pub window_end: i64,
-    pub now_ms: i64,          // ← local clock snapshot for relative latency
+struct Row {
+    ts: String, slug: String, now_ms: i64,
 
     // price
-    pub binance_price: f64,
-    pub binance_price_prev: f64,
-    pub binance_bid: f64,
-    pub binance_ask: f64,
-    pub binance_spread_bps: f64,
-    pub binance_volume: f64,
-    pub volume_1sec: f64,
-    pub volume_spike: bool,
+    btc: f64, btc_prev: f64,
+    bnc_bid: f64, bnc_ask: f64, bnc_spr_bps: f64,
+    vol_1min: f64, vol_1sec: f64, vol_spike: bool,
 
-    // polymarket
-    pub yes_bid: f64,  pub yes_bid_size: f64,
-    pub yes_ask: f64,  pub yes_ask_size: f64,
-    pub no_bid: f64,   pub no_bid_size: f64,
-    pub no_ask: f64,   pub no_ask_size: f64,
-    pub yes_spread_bps: f64,
-    pub no_spread_bps: f64,
+    // poly
+    yes_bid: f64, yes_bid_sz: f64, yes_ask: f64, yes_ask_sz: f64,
+    no_bid:  f64, no_bid_sz:  f64, no_ask:  f64, no_ask_sz:  f64,
+    yes_spr_bps: f64, no_spr_bps: f64,
+    yes_fee: f64, no_fee: f64,  // %
 
-    // greeks / options
-    pub strike_price: f64,
-    pub realized_vol: f64,
-    pub delta_yes: f64,
-    pub gamma: f64,
-    pub vega: f64,
-    pub theta: f64,
+    // greeks
+    strike: f64, vol: f64, ttx: f64, ttx_total: f64,
+    delta: f64, gamma: f64, vega: f64, theta: f64,
 
-    // outcome deviation  ← NEW
-    pub price_vs_strike_usd: f64,   // binance_price - strike  (signed)
-    pub price_vs_strike_pct: f64,   // (binance_price - strike) / strike * 100
-    pub outcome_projection: String, // "YES" / "NO" / "OPEN"
-    pub outcome_confidence: f64,    // 0..1  based on delta_yes
+    // z-score & deviation
+    z: f64, abs_z: f64, z_dir: String,
+    z_flip: bool, z_flips: u32,
+    exp_move: f64,   // %
+    exp_move_usd: f64,
+    dev_usd: f64, dev_pct: f64,
+    regime: String, time_pct: f64,
+    pct_above: f64,  // % of ticks btc > strike this window
+
+    // confidence
+    conf: Confidence,
+
+    // outcome
+    outcome: String,
+    out_conf: f64,  // 0..1
 
     // volatility
-    pub vol_1sec: f64,  pub vol_5sec: f64,
-    pub vol_13sec: f64, pub vol_34sec: f64, pub vol_89sec: f64,
-    pub volatility_regime: String,
+    vol_1s: f64, vol_5s: f64, vol_13s: f64, vol_34s: f64, vol_89s: f64,
+    vol_regime: String, realized_vol: f64,
 
     // signal
-    pub signal_quality: String,
-    pub trade_confidence: f64,
+    sig_quality: String, sig_conf: f64,
 
     // RTDS
-    pub rtds_binance_price: f64,
-    pub rtds_chainlink_price: f64,
-    pub rtds_binance_dev_bps: f64,
-    pub rtds_chainlink_dev_bps: f64,
-    pub rtds_price_advantage_bps: f64,
-    pub rtds_chainlink_binance_spread_bps: f64,
-    pub rtds_binance_lag_ms: i64,
-    pub rtds_chainlink_lag_ms: i64,
-    pub rtds_binance_stale_ms: i64,
-    pub rtds_chainlink_stale_ms: i64,
+    rtds_adv: f64,
+    rtds_cl_dev: f64,
+    rtds_stale: bool,          // BPS-mode stale flag
+    rtds_bnc_lag: i64,
+    rtds_cl_lag: i64,
+    rtds_bnc_stale_ms: i64,
+    rtds_cl_stale_ms: i64,
 
-    // ── FIXED LATENCY FIELDS ── stored as raw epoch-ms, displayed as (now_ms - x)
-    pub binance_update_ms: i64,     // epoch ms
-    pub poly_yes_update_ms: i64,    // epoch ms
-    pub poly_no_update_ms: i64,     // epoch ms
-    pub latency_binance_poly_ms: i64,
+    // latency (epoch-ms; display = now_ms - field)
+    bnc_update_ms: i64,
+    poly_yes_ms: i64,
+    poly_no_ms: i64,
+    // B↔P delta — raw value may be cross-clock garbage; use sane_latency()
+    bvp_delta_ms: i64,
 
     // derived
-    pub obi: f64,
-    pub cvd_1m: f64, pub cvd_3m: f64, pub cvd_5m: f64,
-    pub signal_score: i32,
+    obi: f64,
+    cvd1m: f64, cvd3m: f64, cvd5m: f64,
+    sig_score: i32,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rolling history
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
-pub struct RollingHistory {
-    pub price_ticks:   VecDeque<f64>,
-    pub vol_ticks:     VecDeque<u64>,
-    pub price_1m_ago:  f64,
-    pub price_24h_ago: f64,
-    pub cvd_buckets_1m: VecDeque<(i64, f64)>,
-    pub cvd_buckets_3m: VecDeque<(i64, f64)>,
-    pub cvd_buckets_5m: VecDeque<(i64, f64)>,
+#[derive(Default)]
+struct History {
+    price:       VecDeque<f64>,
+    z_hist:      VecDeque<f64>,
+    z_dir_hist:  VecDeque<bool>,
+    z_flipped:   bool,
+    z_flips:     u32,
+    prev_z_dir:  Option<bool>,
+    opening_dev: Option<f64>,
+    above_count: u64,
+    tick_count:  u64,
+    price_1m:    f64,
+    cvd_1m:      VecDeque<(i64, f64)>,
+    cvd_3m:      VecDeque<(i64, f64)>,
+    cvd_5m:      VecDeque<(i64, f64)>,
 }
 
-impl RollingHistory {
-    fn push_tick(&mut self, price: f64, volume: f64) {
-        self.price_ticks.push_back(price);
-        if self.price_ticks.len() > 120 { self.price_ticks.pop_front(); }
-        if self.price_ticks.len() >= 60 {
-            self.price_1m_ago = self.price_ticks[self.price_ticks.len() - 60];
+impl History {
+    fn push(&mut self, btc: f64, z: f64, is_yes: bool, now_sec: i64, cvd: f64, strike: f64) {
+        self.price.push_back(btc);
+        if self.price.len() > 200 { self.price.pop_front(); }
+        if self.price.len() >= 60 { self.price_1m = self.price[self.price.len() - 60]; }
+
+        self.z_hist.push_back(z);
+        if self.z_hist.len() > 500 { self.z_hist.pop_front(); }
+        self.z_dir_hist.push_back(is_yes);
+        if self.z_dir_hist.len() > 500 { self.z_dir_hist.pop_front(); }
+
+        if let Some(p) = self.prev_z_dir {
+            if p != is_yes { self.z_flipped = true; self.z_flips += 1; }
         }
-        self.vol_ticks.push_back((volume * 10.0) as u64);
-        if self.vol_ticks.len() > 60 { self.vol_ticks.pop_front(); }
-    }
-    fn push_cvd(&mut self, net_usd: f64, now_sec: i64) {
+        self.prev_z_dir = Some(is_yes);
+
+        if self.opening_dev.is_none() && strike > 0.0 {
+            self.opening_dev = Some((btc - strike) / strike);
+        }
+
+        if btc > strike { self.above_count += 1; }
+        self.tick_count += 1;
+
+        // prune & push CVD
         let prune = |dq: &mut VecDeque<(i64, f64)>, w: i64| {
-            while dq.front().map(|(t, _)| now_sec - t > w).unwrap_or(false) { dq.pop_front(); }
+            while dq.front().map(|(t, _)| now_sec - *t > w).unwrap_or(false) { dq.pop_front(); }
         };
-        prune(&mut self.cvd_buckets_1m, 60);
-        prune(&mut self.cvd_buckets_3m, 180);
-        prune(&mut self.cvd_buckets_5m, 300);
-        self.cvd_buckets_1m.push_back((now_sec, net_usd));
-        self.cvd_buckets_3m.push_back((now_sec, net_usd));
-        self.cvd_buckets_5m.push_back((now_sec, net_usd));
+        prune(&mut self.cvd_1m, 60);
+        prune(&mut self.cvd_3m, 180);
+        prune(&mut self.cvd_5m, 300);
+        self.cvd_1m.push_back((now_sec, cvd));
+        self.cvd_3m.push_back((now_sec, cvd));
+        self.cvd_5m.push_back((now_sec, cvd));
     }
-    fn cvd_1m(&self) -> f64 { self.cvd_buckets_1m.iter().map(|(_, v)| v).sum() }
-    fn cvd_3m(&self) -> f64 { self.cvd_buckets_3m.iter().map(|(_, v)| v).sum() }
-    fn cvd_5m(&self) -> f64 { self.cvd_buckets_5m.iter().map(|(_, v)| v).sum() }
+    fn c1(&self) -> f64 { self.cvd_1m.iter().map(|(_, v)| v).sum() }
+    fn c3(&self) -> f64 { self.cvd_3m.iter().map(|(_, v)| v).sum() }
+    fn c5(&self) -> f64 { self.cvd_5m.iter().map(|(_, v)| v).sum() }
+    fn pct_above(&self) -> f64 {
+        if self.tick_count == 0 { 0.5 } else { self.above_count as f64 / self.tick_count as f64 }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Signal scoring
+// OBI & signal
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn compute_signal_score(row: &DashRow) -> i32 {
+fn calc_obi(yb: f64, ybsz: f64, ya: f64, yasz: f64, nb: f64, nbsz: f64, na: f64, nasz: f64) -> f64 {
+    let tb = yb * ybsz + nb * nbsz;
+    let ta = ya * yasz + na * nasz;
+    let t  = tb + ta;
+    if t == 0.0 { 0.0 } else { (tb - ta) / t }
+}
+
+fn calc_signal(row: &Row) -> i32 {
     let mut s: i32 = 0;
     if row.obi < -0.3 { s -= 2; } else if row.obi > 0.3 { s += 2; }
-    if row.cvd_5m < -50_000.0 { s -= 2; } else if row.cvd_5m > 50_000.0 { s += 2; }
-    let macd = row.vol_13sec - row.vol_34sec;
+    if row.cvd5m < -50_000.0 { s -= 2; } else if row.cvd5m > 50_000.0 { s += 2; }
+    let macd = row.vol_13s - row.vol_34s;
     if macd < -0.0001 { s -= 1; } else if macd > 0.0001 { s += 1; }
-    if row.binance_price < row.strike_price { s -= 1; } else { s += 1; }
-    if row.binance_price < row.binance_price_prev { s -= 1; } else if row.binance_price > row.binance_price_prev { s += 1; }
+    if row.btc < row.strike { s -= 1; } else { s += 1; }
+    if row.btc < row.btc_prev { s -= 1; } else if row.btc > row.btc_prev { s += 1; }
     s.clamp(-7, 7)
-}
-
-fn obi_from_book(ybs: f64, ybsz: f64, yas: f64, yasz: f64, nbs: f64, nbsz: f64, nas: f64, nasz: f64) -> f64 {
-    let total_bid = ybs * ybsz + nbs * nbsz;
-    let total_ask = yas * yasz + nas * nasz;
-    let total = total_bid + total_ask;
-    if total == 0.0 { 0.0 } else { (total_bid - total_ask) / total }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Colour palette
 // ─────────────────────────────────────────────────────────────────────────────
 
-const C_GREEN:   Color = Color::Rgb(0, 230, 115);
-const C_RED:     Color = Color::Rgb(255, 75, 75);
-const C_YELLOW:  Color = Color::Rgb(255, 210, 40);
-const C_MAGENTA: Color = Color::Rgb(210, 70, 210);
-const C_CYAN:    Color = Color::Rgb(60, 210, 255);
-const C_GRAY:    Color = Color::Rgb(130, 130, 145);
-const C_WHITE:   Color = Color::Rgb(225, 225, 230);
-const C_DIM:     Color = Color::Rgb(60, 60, 70);
-const C_ORANGE:  Color = Color::Rgb(255, 155, 35);
-const C_BG:      Color = Color::Rgb(10, 10, 16);
-const C_BG2:     Color = Color::Rgb(16, 16, 24);
-const C_BORDER:  Color = Color::Rgb(45, 45, 62);
-const C_TEAL:    Color = Color::Rgb(0, 200, 160);
-const C_GOLD:    Color = Color::Rgb(255, 195, 0);
+const CG:   Color = Color::Rgb(0,   230, 115);
+const CR:   Color = Color::Rgb(255, 70,  70);
+const CY:   Color = Color::Rgb(255, 210, 40);
+const CM:   Color = Color::Rgb(210, 70,  210);
+const CC:   Color = Color::Rgb(60,  210, 255);
+const CGR:  Color = Color::Rgb(120, 120, 135);
+const CW:   Color = Color::Rgb(225, 225, 230);
+const CDIM: Color = Color::Rgb(50,  50,  60);
+const COR:  Color = Color::Rgb(255, 155, 35);
+const CBG:  Color = Color::Rgb(10,  10,  16);
+const CBG2: Color = Color::Rgb(18,  18,  28);
+const CBD:  Color = Color::Rgb(45,  45,  62);
+const CTL:  Color = Color::Rgb(0,   195, 155);
+const CGD:  Color = Color::Rgb(255, 195, 0);
+const CPK:  Color = Color::Rgb(255, 100, 180);
 
-fn price_color(now: f64, prev: f64) -> Color {
-    if now > prev { C_GREEN } else if now < prev { C_RED } else { C_WHITE }
+fn cs(v: f64) -> Color { if v > 0.0 { CG } else if v < 0.0 { CR } else { CGR } }
+fn cp(n: f64, p: f64) -> Color { if n > p { CG } else if n < p { CR } else { CW } }
+fn clat(ms: i64) -> Color { if ms < 200 { CG } else if ms < 800 { CY } else if ms < 2000 { COR } else { CR } }
+fn cstale(ms: i64) -> Color { if ms < 500 { CG } else if ms < 1500 { CY } else if ms < 3000 { COR } else { CR } }
+fn cconf(v: f64) -> Color { if v >= 0.8 { CG } else if v >= 0.6 { CY } else if v >= 0.4 { COR } else { CR } }
+fn czc(abs_z: f64) -> Color { if abs_z >= 3.0 { CG } else if abs_z >= 1.5 { CY } else if abs_z >= 0.5 { COR } else { CGR } }
+fn cregime(r: &str) -> Color {
+    match r { "YES_EXTREME" => CG, "YES_TREND" => CTL, "NO_TREND" => COR, "NO_EXTREME" => CR, _ => CGR }
 }
-fn signed_color(v: f64) -> Color {
-    if v > 0.0 { C_GREEN } else if v < 0.0 { C_RED } else { C_GRAY }
-}
-fn signal_color(score: i32) -> Color {
-    if score <= -4 { C_RED } else if score <= -1 { C_ORANGE }
-    else if score == 0 { C_GRAY } else if score <= 3 { C_CYAN } else { C_GREEN }
-}
-fn latency_color(ms: i64) -> Color {
-    if ms < 200 { C_GREEN } else if ms < 800 { C_YELLOW } else if ms < 2000 { C_ORANGE } else { C_RED }
-}
-fn staleness_color(ms: i64) -> Color {
-    if ms < 500 { C_GREEN } else if ms < 1500 { C_YELLOW } else if ms < 3000 { C_ORANGE } else { C_RED }
-}
+fn csig(s: i32) -> Color { if s <= -4 { CR } else if s <= -1 { COR } else if s == 0 { CGR } else if s <= 2 { CC } else { CG } }
 
-fn block_panel<'a>(title: &'a str, accent: Color) -> Block<'a> {
+fn panel<'a>(title: &'a str, accent: Color) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(accent))
         .title(Line::from(vec![
-            Span::styled(" ", Style::default()),
+            Span::raw(" "),
             Span::styled(title, Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-            Span::styled(" ", Style::default()),
+            Span::raw(" "),
         ]))
-        .style(Style::default().bg(C_BG))
-}
-
-// Mini inline bar:  ████░░░░  width chars, filled = ratio 0..1
-fn mini_bar(ratio: f64, width: usize, fill_c: Color) -> Vec<Span<'static>> {
-    let filled = ((ratio.clamp(0.0, 1.0)) * width as f64).round() as usize;
-    let empty  = width - filled;
-    vec![
-        Span::styled("█".repeat(filled), Style::default().fg(fill_c)),
-        Span::styled("░".repeat(empty),  Style::default().fg(C_DIM)),
-    ]
+        .style(Style::default().bg(CBG))
 }
 
 fn fmt_usd(v: f64) -> String {
-    if v.abs() >= 1_000_000.0 { format!("{:+.2}M", v / 1_000_000.0) }
-    else if v.abs() >= 1_000.0 { format!("{:+.1}K", v / 1_000.0) }
+    if v.abs() >= 1_000_000.0 { format!("{:+.2}M", v / 1e6) }
+    else if v.abs() >= 1_000.0 { format!("{:+.1}K", v / 1e3) }
     else { format!("{:+.0}", v) }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Panel renderers
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn render_header(f: &mut Frame, area: Rect, row: &DashRow, hist: &RollingHistory) {
-    let price_c = price_color(row.binance_price, row.binance_price_prev);
-    let pct_1m  = if hist.price_1m_ago > 0.0 {
-        (row.binance_price - hist.price_1m_ago) / hist.price_1m_ago * 100.0
-    } else { 0.0 };
-    let pct_24h = if hist.price_24h_ago > 0.0 {
-        (row.binance_price - hist.price_24h_ago) / hist.price_24h_ago * 100.0
-    } else { 0.0 };
-
-    let ttx_secs = (row.ttx_min * 60.0) as i64;
-    let mm = ttx_secs / 60;
-    let ss = ttx_secs % 60;
-    let ttx_color = if ttx_secs < 90 { C_RED } else if ttx_secs < 240 { C_ORANGE } else { C_GREEN };
-
-    // Outcome deviation
-    let dev_usd = row.price_vs_strike_usd;
-    let dev_pct = row.price_vs_strike_pct;
-    let dev_arrow = if dev_usd >= 0.0 { "▲" } else { "▼" };
-    let dev_c = if dev_usd >= 0.0 { C_GREEN } else { C_RED };
-    let outcome_label = match row.outcome_projection.as_str() {
-        "YES" => "→ YES",
-        "NO"  => "→ NO",
-        _     => "→ OPEN",
-    };
-    let outcome_c = match row.outcome_projection.as_str() {
-        "YES" => C_GREEN,
-        "NO"  => C_RED,
-        _     => C_GRAY,
-    };
-
-    let vol_regime_c = match row.volatility_regime.as_str() {
-        "HIGH"   => C_RED,
-        "MEDIUM" => C_ORANGE,
-        _        => C_TEAL,
-    };
-
-    let now_str = Utc::now().format("%H:%M:%S UTC").to_string();
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("  ₿ BTC ", Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("${:.2}", row.binance_price),
-                Style::default().fg(price_c).add_modifier(Modifier::BOLD)),
-            Span::styled("  │  1m ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:+.3}%", pct_1m), Style::default().fg(signed_color(pct_1m))),
-            Span::styled("  24h ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:+.3}%", pct_24h), Style::default().fg(signed_color(pct_24h))),
-            Span::styled("  │  Vol ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.0}", row.binance_volume), Style::default().fg(C_WHITE)),
-            Span::styled("  │  Regime ", Style::default().fg(C_GRAY)),
-            Span::styled(&row.volatility_regime, Style::default().fg(vol_regime_c).add_modifier(Modifier::BOLD)),
-            Span::styled("  │  Q* ", Style::default().fg(C_GRAY)),
-            Span::styled(&row.signal_quality, Style::default().fg(C_CYAN)),
-            Span::styled(format!(" Conf {:.2}", row.trade_confidence), Style::default().fg(C_GRAY)),
-            Span::styled("  │  ", Style::default().fg(C_DIM)),
-            Span::styled(&now_str, Style::default().fg(C_GRAY)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Strike ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("${:.2}", row.strike_price), Style::default().fg(C_GOLD)),
-            Span::styled("  ", Style::default()),
-            Span::styled(dev_arrow, Style::default().fg(dev_c).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ${:.2}", dev_usd.abs()), Style::default().fg(dev_c).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" ({:+.3}%)", dev_pct), Style::default().fg(dev_c)),
-            Span::styled("  ", Style::default()),
-            Span::styled(outcome_label, Style::default().fg(outcome_c).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
-            Span::styled(format!("  conf {:.0}%", row.outcome_confidence * 100.0), Style::default().fg(outcome_c)),
-            Span::styled("  │  ", Style::default().fg(C_DIM)),
-            Span::styled("⏱ TTX ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:02}:{:02}", mm, ss), Style::default().fg(ttx_color).add_modifier(Modifier::BOLD)),
-            Span::styled("  │  ", Style::default().fg(C_DIM)),
-            Span::styled(&row.slug, Style::default().fg(C_MAGENTA)),
-        ]),
-    ];
-
-    let para = Paragraph::new(lines)
-        .block(block_panel("BTC · POLYMARKET DASHBOARD", C_CYAN))
-        .style(Style::default().bg(C_BG));
-    f.render_widget(para, area);
-
-    // TTX progress gauge overlay — rendered in a thin sub-slice of header bottom row
-    // (Ratatui can't overlap; we position it as the last row of the header area)
-    // Actually render TTX gauge as standalone in the header rect lower strip
+fn lat_str(ms: Option<i64>) -> String {
+    match ms { Some(v) => format!("{:>5}ms", v), None => "  ---  ".into() }
 }
 
-fn render_ttx_gauge(f: &mut Frame, area: Rect, row: &DashRow) {
-    // area is a 1-row stripe at the very bottom of header zone
-    let elapsed = row.ttx_total_min - row.ttx_min;
-    let ratio = (elapsed / row.ttx_total_min.max(0.001)).clamp(0.0, 1.0);
-    let pct = (ratio * 100.0) as u16;
-    let ttx_secs = (row.ttx_min * 60.0) as i64;
-    let ttx_c = if ttx_secs < 90 { C_RED } else if ttx_secs < 240 { C_ORANGE } else { C_TEAL };
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::NONE).style(Style::default().bg(C_BG)))
-        .gauge_style(Style::default().fg(ttx_c).bg(C_BG2))
+// Centered OBI bar: [░░░░│████░░░░] width = total chars
+fn obi_bar(obi: f64, w: usize) -> Line<'static> {
+    let half   = w / 2;
+    let filled = ((obi.abs() * half as f64).round() as usize).min(half);
+    if obi >= 0.0 {
+        Line::from(vec![
+            Span::styled("░".repeat(half),         Style::default().fg(CDIM)),
+            Span::styled("│",                       Style::default().fg(CGR)),
+            Span::styled("█".repeat(filled),        Style::default().fg(CG)),
+            Span::styled("░".repeat(half - filled), Style::default().fg(CDIM)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("░".repeat(half - filled), Style::default().fg(CDIM)),
+            Span::styled("█".repeat(filled),        Style::default().fg(CR)),
+            Span::styled("│",                       Style::default().fg(CGR)),
+            Span::styled("░".repeat(half),          Style::default().fg(CDIM)),
+        ])
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 1: render_header — NO nested layout split.
+//   The outer `draw()` already reserves:
+//     v[0] = Length(4)  ← header paragraph (borders included)
+//     v[1] = Length(1)  ← TTX gauge (no borders)
+//     v[2] = Length(3)  ← z-score panel
+//     v[3] = Min(16)    ← body
+//     v[4] = Length(3)  ← signal bar
+//
+//   render_header only renders into v[0] (a Paragraph with 2 content lines).
+//   render_ttx_gauge renders into v[1] (a bare Gauge, no block).
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn render_header(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
+    let btc_c  = cp(row.btc, row.btc_prev);
+    let pct_1m = if hist.price_1m > 0.0 { (row.btc - hist.price_1m) / hist.price_1m * 100.0 } else { 0.0 };
+    let ttx_s  = (row.ttx * 60.0) as i64;
+    let ttx_c  = if ttx_s < 90 { CR } else if ttx_s < 240 { COR } else { CG };
+    let dev_c  = cs(row.dev_usd);
+    let dv     = if row.dev_usd >= 0.0 { "▲" } else { "▼" };
+    let out_c  = match row.outcome.as_str() { "YES" => CG, "NO" => CR, _ => CGR };
+    let vc     = match row.vol_regime.as_str() { "HIGH" => CR, "MEDIUM" => COR, _ => CTL };
+
+    // Row 1: price | strike + deviation | outcome | TTX | slug | time
+    let line1 = Line::from(vec![
+        Span::styled("  ₿ ", Style::default().fg(CGD)),
+        Span::styled(format!("${:.2}", row.btc),
+            Style::default().fg(btc_c).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {:+.3}%", pct_1m), Style::default().fg(cs(pct_1m))),
+        Span::styled("  │ Strike ", Style::default().fg(CGR)),
+        Span::styled(format!("${:.2}", row.strike), Style::default().fg(CGD)),
+        Span::styled(format!("  {} ${:.2} ({:+.3}%)", dv, row.dev_usd.abs(), row.dev_pct),
+            Style::default().fg(dev_c).add_modifier(Modifier::BOLD)),
+        Span::styled("  │ ", Style::default().fg(CDIM)),
+        Span::styled(&row.outcome, Style::default().fg(out_c).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(format!(" {:.0}%", row.out_conf * 100.0), Style::default().fg(out_c)),
+        Span::styled("  │ ⏱ ", Style::default().fg(CGR)),
+        Span::styled(format!("{:02}:{:02}", ttx_s / 60, ttx_s % 60),
+            Style::default().fg(ttx_c).add_modifier(Modifier::BOLD)),
+        Span::styled("  │ ", Style::default().fg(CDIM)),
+        Span::styled(&row.slug, Style::default().fg(CM)),
+        Span::styled(format!("  {}", Utc::now().format("%H:%M:%S UTC")), Style::default().fg(CGR)),
+    ]);
+    // Row 2: vol | regime | signal | B/A | expected move
+    let line2 = Line::from(vec![
+        Span::styled("  Vol ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.0}", row.vol_1min), Style::default().fg(CW)),
+        Span::styled("  Regime ", Style::default().fg(CGR)),
+        Span::styled(&row.vol_regime, Style::default().fg(vc).add_modifier(Modifier::BOLD)),
+        Span::styled("  Q* ", Style::default().fg(CGR)),
+        Span::styled(&row.sig_quality, Style::default().fg(CC)),
+        Span::styled(format!(" {:.2}", row.sig_conf), Style::default().fg(CGR)),
+        Span::styled("  B/A ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.2}/{:.2}", row.bnc_bid, row.bnc_ask), Style::default().fg(CW)),
+        Span::styled(format!(" {:.1}bps", row.bnc_spr_bps), Style::default().fg(CGR)),
+        Span::styled("  │ ExpMove ", Style::default().fg(CGR)),
+        Span::styled(format!("±{:.4}%", row.exp_move),
+            Style::default().fg(CY).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" (±${:.2})", row.exp_move_usd), Style::default().fg(CY)),
+        Span::styled("  │ Above-strike ", Style::default().fg(CGR)),
+        Span::styled(
+            format!("{:.0}%", row.pct_above * 100.0),
+            Style::default().fg(if row.pct_above > 0.6 { CG } else if row.pct_above < 0.4 { CR } else { CGR }),
+        ),
+    ]);
+
+    let para = Paragraph::new(vec![line1, line2])
+        .block(panel("BTC · POLYMARKET DASHBOARD", CC))
+        .style(Style::default().bg(CBG));
+    f.render_widget(para, area);
+}
+
+// FIX 1 cont.: TTX gauge rendered into its own bare row (no Block borders)
+fn render_ttx_gauge(f: &mut Frame, area: Rect, row: &Row) {
+    let elapsed = (row.ttx_total - row.ttx).max(0.0);
+    let pct     = ((elapsed / row.ttx_total.max(0.001)) * 100.0).clamp(0.0, 100.0) as u16;
+    let ttx_s   = (row.ttx * 60.0) as i64;
+    let ttx_c   = if ttx_s < 90 { CR } else if ttx_s < 240 { COR } else { CTL };
+    let gauge   = Gauge::default()
+        .block(Block::default().borders(Borders::NONE).style(Style::default().bg(CBG)))
+        .gauge_style(Style::default().fg(ttx_c).bg(CBG2))
         .percent(pct)
         .label(Span::styled(
-            format!(" Window elapsed {:.0}% ", ratio * 100.0),
+            format!(" Window {:.0}% elapsed ", pct),
             Style::default().fg(ttx_c),
         ));
     f.render_widget(gauge, area);
 }
 
-fn render_order_book(f: &mut Frame, area: Rect, row: &DashRow) {
-    let obi_pct = row.obi * 100.0;
-    let obi_c   = if row.obi < -0.2 { C_RED } else if row.obi > 0.2 { C_GREEN } else { C_GRAY };
-    let obi_lbl = if row.obi < -0.15 { "BEARISH" } else if row.obi > 0.15 { "BULLISH" } else { "NEUTRAL" };
+// ─────────────────────────────────────────────────────────────────────────────
+// Z-score / Confidence panel  (full-width, 1 content line)
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // OBI bar — 20 chars wide
-    let bar_ratio = (row.obi + 1.0) / 2.0; // map -1..1 → 0..1
-    let bar_filled = ((bar_ratio * 20.0).round() as usize).clamp(0, 20);
-    let bar_empty  = 20 - bar_filled;
-    let obi_bar: Vec<Span> = vec![
-        Span::styled("[", Style::default().fg(C_DIM)),
-        Span::styled("█".repeat(bar_filled), Style::default().fg(obi_c)),
-        Span::styled("░".repeat(bar_empty),  Style::default().fg(C_DIM)),
-        Span::styled("]", Style::default().fg(C_DIM)),
+fn render_zscore(f: &mut Frame, area: Rect, row: &Row) {
+    let zc   = czc(row.abs_z);
+    let zdc  = if row.z_dir == "YES" { CG } else { CR };
+    let cc   = cconf(row.conf.score);
+    let rc   = cregime(&row.regime);
+    let fc   = if row.z_flip { CG } else { COR };
+    let rtdc = if row.rtds_stale { CG } else { CGR };
+
+    // Vote bar: 5 icons ✓/✗
+    let vote_spans: Vec<Span> = [
+        ("avg_z", row.conf.avg_z_vote),
+        ("vel",   row.conf.vel_vote),
+        ("asym",  row.conf.asym_vote),
+        ("open",  row.conf.open_vote),
+        ("fade",  row.conf.fade_vote),
+    ].iter().flat_map(|(lbl, ok)| vec![
+        Span::styled(lbl.to_string(), Style::default().fg(CGR)),
+        Span::styled(if *ok { "✓" } else { "✗" }, Style::default().fg(if *ok { CG } else { CR })),
+        Span::raw(" "),
+    ]).collect();
+
+    let mut spans = vec![
+        Span::styled("  Z ", Style::default().fg(CGR)),
+        Span::styled(format!("{:+.3}", row.z),       Style::default().fg(zc).add_modifier(Modifier::BOLD)),
+        Span::styled("  |z| ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.3}", row.abs_z),    Style::default().fg(zc)),
+        Span::styled(" → ",                           Style::default().fg(CGR)),
+        Span::styled(&row.z_dir,                     Style::default().fg(zdc).add_modifier(Modifier::BOLD)),
+        Span::styled("  │  Conf ", Style::default().fg(CDIM)),
+        Span::styled(format!("{:.0}%({}/5) ", row.conf.score * 100.0, row.conf.votes),
+            Style::default().fg(cc).add_modifier(Modifier::BOLD)),
     ];
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(" OBI ", Style::default().fg(C_MAGENTA).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:+.1}%", obi_pct), Style::default().fg(obi_c).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", obi_lbl), Style::default().fg(obi_c)),
-        ]),
-        Line::from(obi_bar),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── YES ──────────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  BID ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.yes_bid), Style::default().fg(C_GREEN)),
-            Span::styled(format!(" ×{:.0}", row.yes_bid_size), Style::default().fg(C_DIM)),
-            Span::styled("   ASK ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.yes_ask), Style::default().fg(C_RED)),
-            Span::styled(format!(" ×{:.0}", row.yes_ask_size), Style::default().fg(C_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Spr ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}bps", row.yes_spread_bps), Style::default().fg(C_YELLOW)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── NO ───────────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  BID ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.no_bid),  Style::default().fg(C_GREEN)),
-            Span::styled(format!(" ×{:.0}", row.no_bid_size), Style::default().fg(C_DIM)),
-            Span::styled("   ASK ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.no_ask),  Style::default().fg(C_RED)),
-            Span::styled(format!(" ×{:.0}", row.no_ask_size), Style::default().fg(C_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Spr ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}bps", row.no_spread_bps), Style::default().fg(C_YELLOW)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── BINANCE ──────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  BID ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("${:.2}", row.binance_bid), Style::default().fg(C_GREEN)),
-            Span::styled("   ASK ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("${:.2}", row.binance_ask), Style::default().fg(C_RED)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Spr ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.2}bps", row.binance_spread_bps), Style::default().fg(C_YELLOW)),
-        ]),
-    ];
-
-    let para = Paragraph::new(lines)
-        .block(block_panel("ORDER BOOK", C_BORDER))
-        .style(Style::default().bg(C_BG));
-    f.render_widget(para, area);
-}
-
-fn render_flow_volume(f: &mut Frame, area: Rect, row: &DashRow, hist: &RollingHistory) {
-    let cvd_1m = hist.cvd_1m();
-    let cvd_3m = hist.cvd_3m();
-    let cvd_5m = hist.cvd_5m();
-
-    // CVD inline colour bars (normalised to cvd_5m as reference scale)
-    let scale = cvd_5m.abs().max(1.0);
-    let bar1 = (cvd_1m / scale).abs().min(1.0);
-    let bar3 = (cvd_3m / scale).abs().min(1.0);
-
-    let spike_c = if row.volume_spike { C_RED } else { C_GRAY };
-    let spike_t = if row.volume_spike { " 🔥 SPIKE" } else { "" };
-
-    let vol_regime_c = match row.volatility_regime.as_str() {
-        "HIGH"   => C_RED,
-        "MEDIUM" => C_ORANGE,
-        _        => C_TEAL,
-    };
-
-    let lines = vec![
-        Line::from(vec![Span::styled(" ── CVD ──────────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  1m ", Style::default().fg(C_GRAY)),
-            Span::styled(fmt_usd(cvd_1m), Style::default().fg(signed_color(cvd_1m)).add_modifier(Modifier::BOLD)),
-            Span::styled("   3m ", Style::default().fg(C_GRAY)),
-            Span::styled(fmt_usd(cvd_3m), Style::default().fg(signed_color(cvd_3m))),
-            Span::styled("   5m ", Style::default().fg(C_GRAY)),
-            Span::styled(fmt_usd(cvd_5m), Style::default().fg(signed_color(cvd_5m))),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── VOLUME ───────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  1s ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.0}", row.volume_1sec), Style::default().fg(C_WHITE)),
-            Span::styled("   1m ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.0}", row.binance_volume), Style::default().fg(C_WHITE)),
-            Span::styled(spike_t, Style::default().fg(spike_c).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── VOLATILITY ───────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  1s ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.vol_1sec),  Style::default().fg(C_CYAN)),
-            Span::styled("   5s ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.vol_5sec),  Style::default().fg(C_CYAN)),
-        ]),
-        Line::from(vec![
-            Span::styled("  13s ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.vol_13sec), Style::default().fg(C_CYAN)),
-            Span::styled("  34s ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.vol_34sec), Style::default().fg(C_CYAN)),
-            Span::styled("  89s ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.4}", row.vol_89sec), Style::default().fg(C_CYAN)),
-        ]),
-        Line::from(vec![
-            Span::styled("  RealVol ", Style::default().fg(C_GRAY)),
-            Span::styled(
-                format!("{:.4}%", row.realized_vol * 100.0),
-                Style::default().fg(C_GOLD).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Regime ", Style::default().fg(C_GRAY)),
-            Span::styled(&row.volatility_regime, Style::default().fg(vol_regime_c).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
-
-    let para = Paragraph::new(lines)
-        .block(block_panel("FLOW · CVD · VOLUME", C_BORDER))
-        .style(Style::default().bg(C_BG));
-    f.render_widget(para, area);
-}
-
-fn render_technicals(f: &mut Frame, area: Rect, row: &DashRow) {
-    let rsi_proxy = (row.realized_vol * 100.0).clamp(0.0, 100.0) * 0.7 + 30.0;
-    let rsi_c = if rsi_proxy < 35.0 { C_RED } else if rsi_proxy > 65.0 { C_GREEN } else { C_YELLOW };
-    let macd_hist = row.vol_13sec - row.vol_34sec;
-    let ema_c = if row.vol_1sec < row.vol_5sec { C_RED } else { C_GREEN };
-    let ema_lbl = if row.vol_1sec < row.vol_5sec { "DEATH ✗" } else { "GOLDEN ✓" };
-    let vwap_c = if row.binance_price < row.strike_price { C_RED } else { C_GREEN };
-    let vwap_lbl = if row.binance_price < row.strike_price { "BELOW" } else { "ABOVE" };
-
-    let lines = vec![
-        Line::from(vec![Span::styled(" ── MOMENTUM ─────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  RSI(14) ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}", rsi_proxy), Style::default().fg(rsi_c).add_modifier(Modifier::BOLD)),
-            Span::styled("   MACD hist ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:+.6}", macd_hist), Style::default().fg(signed_color(macd_hist))),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── TREND ────────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  EMA cross ", Style::default().fg(C_GRAY)),
-            Span::styled(ema_lbl, Style::default().fg(ema_c).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("  VWAP proxy ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("${:.2}", row.strike_price), Style::default().fg(C_GOLD)),
-            Span::styled(format!("  Price {}", vwap_lbl), Style::default().fg(vwap_c)),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── RTDS ─────────────────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  Bnce dev ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}bps", row.rtds_binance_dev_bps), Style::default().fg(signed_color(row.rtds_binance_dev_bps))),
-            Span::styled("   CL dev ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}bps", row.rtds_chainlink_dev_bps), Style::default().fg(signed_color(row.rtds_chainlink_dev_bps))),
-        ]),
-        Line::from(vec![
-            Span::styled("  Adv ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}bps", row.rtds_price_advantage_bps), Style::default().fg(signed_color(row.rtds_price_advantage_bps))),
-            Span::styled("   CL-B ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.1}bps", row.rtds_chainlink_binance_spread_bps), Style::default().fg(C_CYAN)),
-        ]),
-        Line::from(vec![
-            Span::styled("  B-stale ", Style::default().fg(C_GRAY)),
-            Span::styled(
-                format!("{}ms", row.rtds_binance_stale_ms),
-                Style::default().fg(staleness_color(row.rtds_binance_stale_ms)),
-            ),
-            Span::styled("   CL-stale ", Style::default().fg(C_GRAY)),
-            Span::styled(
-                format!("{}ms", row.rtds_chainlink_stale_ms),
-                Style::default().fg(staleness_color(row.rtds_chainlink_stale_ms)),
-            ),
-        ]),
-    ];
-
-    let para = Paragraph::new(lines)
-        .block(block_panel("TECHNICALS · RTDS", C_BORDER))
-        .style(Style::default().bg(C_BG));
-    f.render_widget(para, area);
-}
-
-fn render_greeks_latency(f: &mut Frame, area: Rect, row: &DashRow) {
-    // ── FIXED LATENCY ──
-    // binance_update_ms, poly_*_update_ms are epoch-ms
-    // We show (now_ms - field) = how many ms ago the update arrived
-    let b_age_ms  = (row.now_ms - row.binance_update_ms).max(0);
-    let py_age_ms = (row.now_ms - row.poly_yes_update_ms).max(0);
-    let pn_age_ms = (row.now_ms - row.poly_no_update_ms).max(0);
-
-    let lines = vec![
-        Line::from(vec![Span::styled(" ── OPTIONS GREEKS ───────────", Style::default().fg(C_DIM))]),
-        Line::from(vec![
-            Span::styled("  Δ delta  ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.8}", row.delta_yes),
-                Style::default().fg(C_CYAN).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Γ gamma  ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.8}", row.gamma), Style::default().fg(C_WHITE)),
-        ]),
-        Line::from(vec![
-            Span::styled("  ν vega   ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.8}", row.vega), Style::default().fg(C_WHITE)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Θ theta  ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:.8}", row.theta),
-                Style::default().fg(signed_color(row.theta))),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(" ── FEED LATENCY ─────────────", Style::default().fg(C_DIM))]),
-        // FIXED: show relative age (now_ms - update_ms), not raw epoch fragments
-        Line::from(vec![
-            Span::styled("  Binance  ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:>6}ms", b_age_ms), Style::default().fg(latency_color(b_age_ms))),
-            Span::styled(" ago", Style::default().fg(C_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Poly YES ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:>6}ms", py_age_ms), Style::default().fg(latency_color(py_age_ms))),
-            Span::styled(" ago", Style::default().fg(C_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Poly NO  ", Style::default().fg(C_GRAY)),
-            Span::styled(format!("{:>6}ms", pn_age_ms), Style::default().fg(latency_color(pn_age_ms))),
-            Span::styled(" ago", Style::default().fg(C_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled("  B↔P Δ   ", Style::default().fg(C_GRAY)),
-            Span::styled(
-                format!("{:>+6}ms", row.latency_binance_poly_ms),
-                Style::default().fg(latency_color(row.latency_binance_poly_ms.abs())),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  RTDS-B  ", Style::default().fg(C_GRAY)),
-            Span::styled(
-                format!("{:>6}ms", row.rtds_binance_lag_ms),
-                Style::default().fg(latency_color(row.rtds_binance_lag_ms)),
-            ),
-            Span::styled("  RTDS-CL ", Style::default().fg(C_GRAY)),
-            Span::styled(
-                format!("{:>6}ms", row.rtds_chainlink_lag_ms),
-                Style::default().fg(latency_color(row.rtds_chainlink_lag_ms)),
-            ),
-        ]),
-    ];
-
-    let para = Paragraph::new(lines)
-        .block(block_panel("GREEKS · LATENCY", C_BORDER))
-        .style(Style::default().bg(C_BG));
-    f.render_widget(para, area);
-}
-
-fn render_signal_bar(f: &mut Frame, area: Rect, row: &DashRow, hist: &RollingHistory) {
-    let score     = row.signal_score;
-    let score_lbl = if score <= -4 { "STRONG BEARISH" }
-        else if score <= -2 { "BEARISH" }
-        else if score == -1 { "LEAN BEARISH" }
-        else if score ==  0 { "NEUTRAL" }
-        else if score ==  1 { "LEAN BULLISH" }
-        else if score <=  3 { "BULLISH" }
-        else                { "STRONG BULLISH" };
-    let score_c = signal_color(score);
-
-    // Gauge: -7..+7 → 0..100%
-    let gauge_pct = ((score + 7) as f64 / 14.0 * 100.0) as u16;
-    let cvd_1m    = hist.cvd_1m();
-    let cvd_5m    = hist.cvd_5m();
-    let macd_hist = row.vol_13sec - row.vol_34sec;
-
-    // Split area: gauge on left half, signal row text on right half
-    let h = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
-
-    let gauge = Gauge::default()
-        .block(block_panel("SIGNAL", C_BORDER))
-        .gauge_style(Style::default().fg(score_c).bg(C_BG2))
-        .percent(gauge_pct)
-        .label(Span::styled(
-            format!(" {} ({:+}/7) ", score_lbl, score),
-            Style::default().fg(score_c).add_modifier(Modifier::BOLD),
-        ));
-    f.render_widget(gauge, h[0]);
-
-    let outcome_c = match row.outcome_projection.as_str() {
-        "YES" => C_GREEN, "NO" => C_RED, _ => C_GRAY,
-    };
-
-    let line = Line::from(vec![
-        Span::styled("  OBI ", Style::default().fg(C_GRAY)),
-        Span::styled(format!("{:+.1}%", row.obi * 100.0), Style::default().fg(signed_color(row.obi))),
-        Span::styled("  │  CVD 1m ", Style::default().fg(C_GRAY)),
-        Span::styled(fmt_usd(cvd_1m), Style::default().fg(signed_color(cvd_1m))),
-        Span::styled("  │  CVD 5m ", Style::default().fg(C_GRAY)),
-        Span::styled(fmt_usd(cvd_5m), Style::default().fg(signed_color(cvd_5m))),
-        Span::styled("  │  MACD ", Style::default().fg(C_GRAY)),
-        Span::styled(format!("{:+.6}", macd_hist), Style::default().fg(signed_color(macd_hist))),
-        Span::styled("  │  ", Style::default().fg(C_DIM)),
-        Span::styled(&row.outcome_projection, Style::default().fg(outcome_c).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" yes {:.4}", row.yes_bid), Style::default().fg(C_GRAY)),
-        Span::styled(format!(" / no {:.4}", row.no_bid), Style::default().fg(C_GRAY)),
+    spans.extend(vote_spans);
+    spans.extend([
+        Span::styled("│  Regime ", Style::default().fg(CDIM)),
+        Span::styled(&row.regime, Style::default().fg(rc).add_modifier(Modifier::BOLD)),
+        Span::styled("  │  z-flip ", Style::default().fg(CGR)),
         Span::styled(
-            format!("  Δ${:.2} ({:+.3}%)", row.price_vs_strike_usd.abs(), row.price_vs_strike_pct),
-            Style::default().fg(signed_color(row.price_vs_strike_usd)).add_modifier(Modifier::BOLD),
+            format!("{} ×{}", if row.z_flip { "YES" } else { "NO " }, row.z_flips),
+            Style::default().fg(fc),
         ),
+        Span::styled("  │  RTDS ", Style::default().fg(CGR)),
+        Span::styled(if row.rtds_stale { "STALE⚡" } else { "fresh " }, Style::default().fg(rtdc).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {:.1}bps", row.rtds_adv), Style::default().fg(CPK)),
+        Span::styled("  │  fade ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.0}%", row.conf.fade_ratio * 100.0),
+            Style::default().fg(if row.conf.fade_ratio >= 0.3 { CG } else { CR })),
     ]);
 
-    let para = Paragraph::new(vec![Line::from(""), line])
-        .block(block_panel("SIGNALS · OUTCOME", C_BORDER))
-        .style(Style::default().bg(C_BG));
-    f.render_widget(para, h[1]);
+    let para = Paragraph::new(vec![Line::from(spans)])
+        .block(panel("Z-SCORE · CONFIDENCE · REGIME", CPK))
+        .style(Style::default().bg(CBG));
+    f.render_widget(para, area);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Root frame renderer
+// Order book panel
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn render_frame(f: &mut Frame, row: &DashRow, hist: &RollingHistory) {
-    let area = f.area();
+fn render_book(f: &mut Frame, area: Rect, row: &Row) {
+    let oc  = if row.obi < -0.2 { CR } else if row.obi > 0.2 { CG } else { CGR };
+    let lbl = if row.obi < -0.15 { "BEARISH" } else if row.obi > 0.15 { "BULLISH" } else { "NEUTRAL" };
 
-    let v = Layout::default()
-        .direction(Direction::Vertical)
+    let combined     = row.yes_ask + row.no_ask;
+    let combined_c   = if combined < 1.0 { CG } else { CR };
+    let arb_flag     = if combined < 1.0 { "  ✅ ARB!" } else { "" };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" OBI ", Style::default().fg(CM).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{:+.1}%", row.obi * 100.0), Style::default().fg(oc).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}", lbl), Style::default().fg(oc)),
+        ]),
+        obi_bar(row.obi, 26),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ YES ────────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  BID ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.yes_bid),    Style::default().fg(CG)),
+            Span::styled(format!(" ×{:.0}", row.yes_bid_sz), Style::default().fg(CDIM)),
+            Span::styled("  ASK ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.yes_ask),    Style::default().fg(CR)),
+            Span::styled(format!(" ×{:.0}", row.yes_ask_sz), Style::default().fg(CDIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Spr ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.1}bps", row.yes_spr_bps), Style::default().fg(CY)),
+            Span::styled("  Fee ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.3}%", row.yes_fee), Style::default().fg(COR)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ NO ─────────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  BID ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.no_bid),  Style::default().fg(CG)),
+            Span::styled(format!(" ×{:.0}", row.no_bid_sz), Style::default().fg(CDIM)),
+            Span::styled("  ASK ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.no_ask),  Style::default().fg(CR)),
+            Span::styled(format!(" ×{:.0}", row.no_ask_sz), Style::default().fg(CDIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Spr ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.1}bps", row.no_spr_bps), Style::default().fg(CY)),
+            Span::styled("  Fee ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.3}%", row.no_fee), Style::default().fg(COR)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ COMBINED ───────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  YES+NO ask ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", combined),
+                Style::default().fg(combined_c).add_modifier(Modifier::BOLD)),
+            Span::styled(arb_flag, Style::default().fg(CG).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ BINANCE ────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  BID ", Style::default().fg(CGR)),
+            Span::styled(format!("${:.2}", row.bnc_bid), Style::default().fg(CG)),
+            Span::styled("  ASK ", Style::default().fg(CGR)),
+            Span::styled(format!("${:.2}", row.bnc_ask), Style::default().fg(CR)),
+            Span::styled(format!("  {:.1}bps", row.bnc_spr_bps), Style::default().fg(CY)),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).block(panel("ORDER BOOK", CBD)).style(Style::default().bg(CBG)),
+        area,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flow / CVD / RTDS panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn render_flow(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
+    let c1 = hist.c1(); let c3 = hist.c3(); let c5 = hist.c5();
+    let vc = match row.vol_regime.as_str() { "HIGH" => CR, "MEDIUM" => COR, _ => CTL };
+    let sc = if row.vol_spike { CR } else { CGR };
+
+    let lines = vec![
+        Line::from(vec![Span::styled(" ─ CVD ─────────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  1m ", Style::default().fg(CGR)),
+            Span::styled(fmt_usd(c1), Style::default().fg(cs(c1)).add_modifier(Modifier::BOLD)),
+            Span::styled("  3m ", Style::default().fg(CGR)),
+            Span::styled(fmt_usd(c3), Style::default().fg(cs(c3))),
+            Span::styled("  5m ", Style::default().fg(CGR)),
+            Span::styled(fmt_usd(c5), Style::default().fg(cs(c5))),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ VOLUME ──────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  1s ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.0}", row.vol_1sec), Style::default().fg(CW)),
+            Span::styled("  1m ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.0}", row.vol_1min), Style::default().fg(CW)),
+            if row.vol_spike {
+                Span::styled("  🔥 SPIKE", Style::default().fg(sc).add_modifier(Modifier::BOLD))
+            } else {
+                Span::raw("")
+            },
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ VOLATILITY ──────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  1s ",  Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.vol_1s),  Style::default().fg(CC)),
+            Span::styled("  5s ",  Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.vol_5s),  Style::default().fg(CC)),
+        ]),
+        Line::from(vec![
+            Span::styled("  13s ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.vol_13s), Style::default().fg(CC)),
+            Span::styled("  34s ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.vol_34s), Style::default().fg(CC)),
+            Span::styled("  89s ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.vol_89s), Style::default().fg(CC)),
+        ]),
+        Line::from(vec![
+            Span::styled("  RealVol ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}%", row.realized_vol * 100.0),
+                Style::default().fg(CGD).add_modifier(Modifier::BOLD)),
+            Span::styled("  Regime ", Style::default().fg(CGR)),
+            Span::styled(&row.vol_regime, Style::default().fg(vc).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ RTDS ────────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  Adv ", Style::default().fg(CGR)),
+            Span::styled(
+                format!("{:.2}bps", row.rtds_adv),
+                Style::default().fg(if row.rtds_stale { CG } else { CGR }),
+            ),
+            Span::styled("  CL-dev ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.2}bps", row.rtds_cl_dev), Style::default().fg(cs(row.rtds_cl_dev))),
+        ]),
+        Line::from(vec![
+            Span::styled("  B-stale ", Style::default().fg(CGR)),
+            Span::styled(format!("{}ms", row.rtds_bnc_stale_ms), Style::default().fg(cstale(row.rtds_bnc_stale_ms))),
+            Span::styled("  CL-stale ", Style::default().fg(CGR)),
+            Span::styled(format!("{}ms", row.rtds_cl_stale_ms), Style::default().fg(cstale(row.rtds_cl_stale_ms))),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).block(panel("FLOW · CVD · RTDS", CBD)).style(Style::default().bg(CBG)),
+        area,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Greeks + Fees + Latency panel
+// FIX 2: latency = now_ms - update_ms (relative age). B↔P shows sane_latency().
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn render_greeks(f: &mut Frame, area: Rect, row: &Row) {
+    // FIX 2: relative ages — epoch fields minus now_ms
+    let b_age  = (row.now_ms - row.bnc_update_ms).clamp(0, MAX_SANE_LATENCY_MS);
+    let py_age = (row.now_ms - row.poly_yes_ms).clamp(0, MAX_SANE_LATENCY_MS);
+    let pn_age = (row.now_ms - row.poly_no_ms).clamp(0, MAX_SANE_LATENCY_MS);
+    // B↔P delta: only display if within sane range
+    let bvp_str = match sane_latency(row.bvp_delta_ms) {
+        Some(v) => format!("{:>+6}ms", v),
+        None    => "  ~~~  ".into(),  // cross-clock garbage — show ~~~ not a huge number
+    };
+    let bvp_c = sane_latency(row.bvp_delta_ms)
+        .map(|v| clat(v.abs())).unwrap_or(CGR);
+
+    let lines = vec![
+        Line::from(vec![Span::styled(" ─ GREEKS ─────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  Δ ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.8}", row.delta), Style::default().fg(CC).add_modifier(Modifier::BOLD)),
+            Span::styled("  Γ ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.8}", row.gamma), Style::default().fg(CW)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ν ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.8}", row.vega),  Style::default().fg(CW)),
+            Span::styled("  Θ ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.8}", row.theta), Style::default().fg(cs(row.theta))),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ FEES ───────────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  YES ask ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.yes_ask), Style::default().fg(CW)),
+            Span::styled(format!("  fee {:.3}%", row.yes_fee), Style::default().fg(COR)),
+        ]),
+        Line::from(vec![
+            Span::styled("  NO  ask ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.4}", row.no_ask), Style::default().fg(CW)),
+            Span::styled(format!("  fee {:.3}%", row.no_fee), Style::default().fg(COR)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Combined", Style::default().fg(CGR)),
+            Span::styled(
+                format!(" {:.4}", row.yes_ask + row.no_ask),
+                Style::default().fg(if row.yes_ask + row.no_ask < 1.0 { CG } else { CR })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if row.yes_ask + row.no_ask < 1.0 { "  ✅ ARB" } else { "" },
+                Style::default().fg(CG).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(" ─ LATENCY (age) ──────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled("  Binance  ", Style::default().fg(CGR)),
+            Span::styled(lat_str(Some(b_age)),  Style::default().fg(clat(b_age))),
+            Span::styled(" ago", Style::default().fg(CDIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Poly YES ", Style::default().fg(CGR)),
+            Span::styled(lat_str(Some(py_age)), Style::default().fg(clat(py_age))),
+            Span::styled("  NO ", Style::default().fg(CGR)),
+            Span::styled(lat_str(Some(pn_age)), Style::default().fg(clat(pn_age))),
+        ]),
+        // FIX 2: B↔P shows ~~~ when cross-clock garbage instead of 85000000ms
+        Line::from(vec![
+            Span::styled("  B↔P Δ   ", Style::default().fg(CGR)),
+            Span::styled(bvp_str, Style::default().fg(bvp_c)),
+        ]),
+        Line::from(vec![
+            Span::styled("  RTDS-B  ", Style::default().fg(CGR)),
+            Span::styled(format!("{:>5}ms", row.rtds_bnc_lag), Style::default().fg(clat(row.rtds_bnc_lag))),
+            Span::styled("  CL ", Style::default().fg(CGR)),
+            Span::styled(format!("{:>5}ms", row.rtds_cl_lag), Style::default().fg(clat(row.rtds_cl_lag))),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(lines).block(panel("GREEKS · FEES · LATENCY", CBD)).style(Style::default().bg(CBG)),
+        area,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signal bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn render_signals(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
+    let sc    = csig(row.sig_score);
+    let lbl   = if row.sig_score <= -4 { "STRONG BEAR" }
+        else if row.sig_score <= -2 { "BEARISH" }
+        else if row.sig_score == -1 { "LEAN BEAR" }
+        else if row.sig_score ==  0 { "NEUTRAL" }
+        else if row.sig_score ==  1 { "LEAN BULL" }
+        else if row.sig_score <=  3 { "BULLISH" }
+        else                        { "STRONG BULL" };
+    let pct   = ((row.sig_score + 7) as f64 / 14.0 * 100.0) as u16;
+    let c1    = hist.c1(); let c5 = hist.c5();
+    let oc    = match row.outcome.as_str() { "YES" => CG, "NO" => CR, _ => CGR };
+    let rc    = cregime(&row.regime);
+    let macd  = row.vol_13s - row.vol_34s;
+
+    let hh = Layout::default().direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)]).split(area);
+
+    let gauge = Gauge::default()
+        .block(panel("SIGNAL", CBD))
+        .gauge_style(Style::default().fg(sc).bg(CBG2))
+        .percent(pct)
+        .label(Span::styled(
+            format!(" {} ({:+}/7) ", lbl, row.sig_score),
+            Style::default().fg(sc).add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(gauge, hh[0]);
+
+    let line = Line::from(vec![
+        Span::styled("  OBI ",  Style::default().fg(CGR)),
+        Span::styled(format!("{:+.1}%", row.obi * 100.0), Style::default().fg(cs(row.obi))),
+        Span::styled("  │ CVD1m ", Style::default().fg(CGR)),
+        Span::styled(fmt_usd(c1), Style::default().fg(cs(c1))),
+        Span::styled("  5m ", Style::default().fg(CGR)),
+        Span::styled(fmt_usd(c5), Style::default().fg(cs(c5))),
+        Span::styled("  │ Z ", Style::default().fg(CGR)),
+        Span::styled(format!("{:+.3}→{}", row.z, row.z_dir),
+            Style::default().fg(czc(row.abs_z)).add_modifier(Modifier::BOLD)),
+        Span::styled("  Conf ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.0}%", row.conf.score * 100.0), Style::default().fg(cconf(row.conf.score))),
+        Span::styled("  │ Regime ", Style::default().fg(CGR)),
+        Span::styled(&row.regime, Style::default().fg(rc)),
+        Span::styled("  │ ", Style::default().fg(CDIM)),
+        Span::styled(&row.outcome, Style::default().fg(oc).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
+        Span::styled(format!(" {:.0}%  y:{:.4} n:{:.4}", row.out_conf * 100.0, row.yes_bid, row.no_bid),
+            Style::default().fg(oc)),
+        Span::styled(
+            format!("  {} ${:.2}({:+.3}%)", if row.dev_usd >= 0.0 { "▲" } else { "▼" }, row.dev_usd.abs(), row.dev_pct),
+            Style::default().fg(cs(row.dev_usd)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  EM ±{:.4}%", row.exp_move), Style::default().fg(CY)),
+    ]);
+
+    f.render_widget(
+        Paragraph::new(vec![Line::raw(""), line])
+            .block(panel("SIGNALS · OUTCOME", CBD))
+            .style(Style::default().bg(CBG)),
+        hh[1],
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 1: Root draw — outer split owns TTX gauge row.
+// Layout (top to bottom):
+//   Length(4)  = header block  (2 text lines + 2 border rows)
+//   Length(1)  = TTX gauge     (NO block borders — pure gauge fill)
+//   Length(3)  = z-score block (1 text line + 2 border rows)
+//   Min(16)    = body
+//   Length(3)  = signal block  (1 text line + 2 border rows)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn draw(f: &mut Frame, row: &Row, hist: &History) {
+    let area = f.area();
+    let v = Layout::default().direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),  // header (2 lines of text + block borders + 1 gauge)
+            Constraint::Length(4),  // header (2 lines + 2 border)
+            Constraint::Length(1),  // TTX gauge (borderless)
+            Constraint::Length(3),  // z-score panel (1 line + 2 border)
             Constraint::Min(16),    // body
-            Constraint::Length(5),  // signal bar
+            Constraint::Length(3),  // signal bar (1 line + 2 border)
         ])
         .split(area);
 
-    // Header: split last row off for TTX gauge
-    let header_v = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Length(1)])
-        .split(v[0]);
-    render_header(f, header_v[0], row, hist);
-    render_ttx_gauge(f, header_v[1], row);
+    render_header(f, v[0], row, hist);
+    render_ttx_gauge(f, v[1], row);
+    render_zscore(f, v[2], row);
 
-    // Body: left 46% | right 54%
-    let body_h = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
-        .split(v[1]);
+    // Body: 44% order book | 56% right column
+    let body = Layout::default().direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .split(v[3]);
 
-    let left_v = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(body_h[0]);
-    let right_v = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
-        .split(body_h[1]);
+    let right = Layout::default().direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(body[1]);
 
-    render_order_book(f, left_v[0], row);
-    render_technicals(f, left_v[1], row);
-    render_flow_volume(f, right_v[0], row, hist);
-    render_greeks_latency(f, right_v[1], row);
+    render_book(f, body[0], row);
+    render_flow(f, right[0], row, hist);
+    render_greeks(f, right[1], row);
 
-    render_signal_bar(f, v[2], row, hist);
+    render_signals(f, v[4], row, hist);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -957,7 +1060,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let duration_secs: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(86400);
+    let dur: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(86400);
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -965,21 +1068,17 @@ async fn main() -> Result<()> {
         .pool_idle_timeout(Duration::from_secs(90))
         .build()?;
 
-    let mut current_market = fetch_current_market(&http).await?;
-    let mut binance = BinanceDataManager::new();
-    binance.connect(&["BTCUSDT"], None).await?;
+    let mut market = fetch_current_market(&http).await?;
+    let mut bnc    = BinanceDataManager::new();
+    bnc.connect(&["BTCUSDT"], None).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let _ = binance.bootstrap_volatility("BTCUSDT", 70).await;
+    let _ = bnc.bootstrap_volatility("BTCUSDT", 70).await;
 
-    let strike = fetch_strike_with_retry(&http, &current_market).await?;
-    current_market.strike_price = Some(strike);
-    current_market.strike_fetched = true;
+    let sk = fetch_strike(&http, &market).await?;
+    market.strike_price = Some(sk); market.strike_fetched = true;
 
     let poly = Arc::new(PolymarketOrderbookStream::new());
-    let mut rx = poly.clone().stream(vec![
-        current_market.yes_token_id.clone(),
-        current_market.no_token_id.clone(),
-    ]).await?;
+    let mut rx = poly.clone().stream(vec![market.yes_token_id.clone(), market.no_token_id.clone()]).await?;
     tokio::spawn(async move { while let Some(_) = rx.recv().await {} });
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -987,174 +1086,173 @@ async fn main() -> Result<()> {
     rtds.start();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // TUI
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     terminal.clear()?;
 
-    let mut hist = RollingHistory::default();
-    let mut prev_price: f64 = 0.0;
-    let mut temp_csv = TempCsvWriter::new();
-    let end_time = SystemTime::now() + Duration::from_secs(duration_secs);
-    let mut consecutive_failures: u32 = 0;
-    let mut last_fetch_ms: i64 = 0;
+    let mut hist     = History::default();
+    let mut prev_btc = 0.0_f64;
+    let mut temp_csv = TempCsv::new();
+    let end_t  = SystemTime::now() + Duration::from_secs(dur);
+    let mut fail_n = 0u32;
+    let mut last_fetch_ms = 0i64;
 
     loop {
-        if SystemTime::now() >= end_time { break; }
+        if SystemTime::now() >= end_t { break; }
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(k) = event::read()? {
                 if matches!(k.code, KeyCode::Char('q') | KeyCode::Esc) { break; }
             }
         }
 
-        let now = Utc::now();
+        let now    = Utc::now();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-        let now_sec = now.timestamp();
+        let now_s  = now.timestamp();
 
-        let snapshot = match binance.get_market_snapshot("BTCUSDT").await {
+        let snap = match bnc.get_market_snapshot("BTCUSDT").await {
             Some(s) => s,
-            None => { tokio::time::sleep(Duration::from_millis(16)).await; continue; }
+            None    => { tokio::time::sleep(Duration::from_millis(16)).await; continue; }
         };
 
-        let yes_p = poly.get_prices(&current_market.yes_token_id);
-        let no_p  = poly.get_prices(&current_market.no_token_id);
-        let (b_bid, b_ask) = binance.get_bid_ask("BTCUSDT").await
-            .unwrap_or((snapshot.spot_price, snapshot.spot_price));
+        let yes_p = poly.get_prices(&market.yes_token_id);
+        let no_p  = poly.get_prices(&market.no_token_id);
+        let (b_bid, b_ask) = bnc.get_bid_ask("BTCUSDT").await.unwrap_or((snap.spot_price, snap.spot_price));
 
-        let ttx_total = 15.0_f64; // minutes per window
-        let ttx       = ((current_market.window_end - now_sec) as f64 / 60.0).max(0.0);
-        let resolved  = ttx <= 0.0;
-        let strike    = current_market.strike_price.unwrap_or(snapshot.spot_price);
-        let greeks    = calculate_greeks(snapshot.spot_price, strike, ttx, snapshot.realized_volatility);
+        let ttx      = ((market.window_end - now_s) as f64 / 60.0).max(0.0);
+        let resolved = ttx <= 0.0;
+        let strike   = market.strike_price.unwrap_or(snap.spot_price);
+        let g        = calculate_greeks(snap.spot_price, strike, ttx, snap.realized_volatility);
 
-        let yes_bid  = yes_p.as_ref().and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
-        let yes_ask  = yes_p.as_ref().and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
-        let no_bid   = no_p.as_ref().and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
-        let no_ask   = no_p.as_ref().and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
-        let yes_bs   = yes_p.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0);
-        let yes_as   = yes_p.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0);
-        let no_bs    = no_p.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0);
-        let no_as    = no_p.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0);
+        // Extract poly prices
+        let y_bid  = yes_p.as_ref().and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
+        let y_ask  = yes_p.as_ref().and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
+        let n_bid  = no_p.as_ref().and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
+        let n_ask  = no_p.as_ref().and_then(|p| p.best_ask.map(|d| d.to_f64().unwrap_or(0.0))).unwrap_or(0.0);
+        let y_bsz  = yes_p.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0);
+        let y_asz  = yes_p.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0);
+        let n_bsz  = no_p.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0);
+        let n_asz  = no_p.as_ref().map(|p| p.best_ask_size).unwrap_or(0.0);
+        // FIX 2: store raw epoch-ms for poly feeds
+        let py_ms  = yes_p.as_ref().map(|p| p.last_update_ms).unwrap_or(now_ms);
+        let pn_ms  = no_p.as_ref().map(|p| p.last_update_ms).unwrap_or(now_ms);
 
-        // Raw epoch-ms (stored as-is; display will subtract now_ms)
-        let poly_yes_ms = yes_p.as_ref().map(|p| p.last_update_ms).unwrap_or(now_ms);
-        let poly_no_ms  = no_p.as_ref().map(|p| p.last_update_ms).unwrap_or(now_ms);
-        let rtds_snap   = rtds.get_snapshot(snapshot.spot_price, snapshot.timestamp);
+        let rtds_s = rtds.get_snapshot(snap.spot_price, snap.timestamp);
 
-        let sign = if snapshot.spot_price > prev_price { 1.0 } else if snapshot.spot_price < prev_price { -1.0 } else { 0.0 };
-        hist.push_cvd(snapshot.volume_1sec * snapshot.spot_price * sign, now_sec);
-        hist.push_tick(snapshot.spot_price, snapshot.volume_1sec);
+        // Z-score
+        let (z, abs_z, z_dir) = z_score(snap.spot_price, strike, snap.realized_volatility, ttx);
+        let is_yes = z_dir == "YES";
+        let em_pct = exp_move_pct(snap.realized_volatility, ttx);
 
-        let obi = obi_from_book(yes_bid, yes_bs, yes_ask, yes_as, no_bid, no_bs, no_ask, no_as);
-        let outcome_str = if resolved {
-            if snapshot.spot_price >= strike { "YES" } else { "NO" }
-        } else { "OPEN" };
+        // CVD
+        let sign   = if snap.spot_price > prev_btc { 1.0 } else if snap.spot_price < prev_btc { -1.0 } else { 0.0 };
+        let cvd_tk = snap.volume_1sec * snap.spot_price * sign;
+        hist.push(snap.spot_price, z, is_yes, now_s, cvd_tk, strike);
 
-        // ── Outcome deviation ──
-        let dev_usd = snapshot.spot_price - strike;
-        let dev_pct = dev_usd / strike * 100.0;
-        // outcome_confidence: how "certain" the market is, based on delta_yes
-        // delta = 1 means clearly ITM (YES), delta = 0 means clearly OTM (NO)
-        let outcome_confidence = if outcome_str == "YES" { greeks.delta }
-            else if outcome_str == "NO" { 1.0 - greeks.delta }
-            else { (greeks.delta - 0.5).abs() * 2.0 };
-
-        let mut row = DashRow {
-            timestamp: now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
-            slug:      current_market.slug.clone(),
-            ttx_min:   ttx, ttx_total_min: ttx_total,
-            time_to_open: current_market.window_start - now_sec,
-            market_resolved: resolved,
-            outcome:   outcome_str.to_string(),
-            window_start: current_market.window_start,
-            window_end:   current_market.window_end,
-            now_ms,   // ← stored for latency display
-
-            binance_price:      snapshot.spot_price,
-            binance_price_prev: prev_price,
-            binance_bid:  b_bid, binance_ask: b_ask,
-            binance_spread_bps: snapshot.spread_bps,
-            binance_volume:     snapshot.volume_1min,
-            volume_1sec:        snapshot.volume_1sec,
-            volume_spike:       snapshot.volume_spike,
-
-            yes_bid, yes_bid_size: yes_bs, yes_ask, yes_ask_size: yes_as,
-            no_bid,  no_bid_size:  no_bs,  no_ask,  no_ask_size:  no_as,
-            yes_spread_bps: calculate_spread_bps(yes_bid, yes_ask),
-            no_spread_bps:  calculate_spread_bps(no_bid,  no_ask),
-
-            strike_price:  strike,
-            realized_vol:  snapshot.realized_volatility,
-            delta_yes:     greeks.delta,
-            gamma:         greeks.gamma,
-            vega:          greeks.vega,
-            theta:         greeks.theta,
-
-            price_vs_strike_usd: dev_usd,
-            price_vs_strike_pct: dev_pct,
-            outcome_projection:  outcome_str.to_string(),
-            outcome_confidence,
-
-            vol_1sec:  snapshot.vol_1sec,  vol_5sec:  snapshot.vol_5sec,
-            vol_13sec: snapshot.vol_13sec, vol_34sec: snapshot.vol_34sec,
-            vol_89sec: snapshot.vol_89sec,
-            volatility_regime: snapshot.volatility_regime.clone(),
-            signal_quality:    snapshot.signal_quality.clone(),
-            trade_confidence:  snapshot.trade_confidence,
-
-            rtds_binance_price:               rtds_snap.rtds_binance_price,
-            rtds_chainlink_price:             rtds_snap.rtds_chainlink_price,
-            rtds_binance_dev_bps:             rtds_snap.rtds_binance_dev_bps,
-            rtds_chainlink_dev_bps:           rtds_snap.rtds_chainlink_dev_bps,
-            rtds_price_advantage_bps:         rtds_snap.rtds_price_advantage_bps,
-            rtds_chainlink_binance_spread_bps:rtds_snap.rtds_chainlink_binance_spread_bps,
-            rtds_binance_lag_ms:              rtds_snap.rtds_binance_lag_ms,
-            rtds_chainlink_lag_ms:            rtds_snap.rtds_chainlink_lag_ms,
-            rtds_binance_stale_ms:            rtds_snap.rtds_binance_stale_ms,
-            rtds_chainlink_stale_ms:          rtds_snap.rtds_chainlink_stale_ms,
-
-            // raw epoch-ms — NOT pre-subtracted here; subtracted in render_greeks_latency
-            binance_update_ms:       snapshot.timestamp,
-            poly_yes_update_ms:      poly_yes_ms,
-            poly_no_update_ms:       poly_no_ms,
-            latency_binance_poly_ms: snapshot.timestamp - (poly_yes_ms + poly_no_ms) / 2,
-
-            obi,
-            cvd_1m: hist.cvd_1m(), cvd_3m: hist.cvd_3m(), cvd_5m: hist.cvd_5m(),
-            signal_score: 0,
+        let obi_v   = calc_obi(y_bid, y_bsz, y_ask, y_asz, n_bid, n_bsz, n_ask, n_asz);
+        let outcome = if resolved { if snap.spot_price >= strike { "YES" } else { "NO" } } else { "OPEN" };
+        let conf    = compute_confidence(&hist.z_hist, is_yes, hist.opening_dev.unwrap_or(0.0));
+        let o_conf  = if outcome != "OPEN" {
+            if outcome == "YES" { g.delta } else { 1.0 - g.delta }
+        } else {
+            (g.delta - 0.5).abs() * 2.0
         };
-        row.signal_score = compute_signal_score(&row);
 
-        let _ = temp_csv.ensure_slug(&current_market.slug, &now);
-        let _ = temp_csv.write_row(&row);
+        // FIX 2: B↔P delta from raw epoch-ms — may be cross-clock garbage;
+        //         sane_latency() will return None if > 10s, display as ~~~
+        let bvp_raw = snap.timestamp - (py_ms + pn_ms) / 2;
 
-        terminal.draw(|f| render_frame(f, &row, &hist))?;
-        prev_price = snapshot.spot_price;
+        let mut row = Row {
+            ts:      now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+            slug:    market.slug.clone(),
+            now_ms,
+            btc:     snap.spot_price,
+            btc_prev: prev_btc,
+            bnc_bid:  b_bid,
+            bnc_ask:  b_ask,
+            // FIX 3: use correct field name from CsvRecord: binance_spread_bps → spread_bps on snapshot
+            bnc_spr_bps: snap.spread_bps,
+            vol_1min:    snap.volume_1min,
+            vol_1sec:    snap.volume_1sec,
+            vol_spike:   snap.volume_spike,
+            yes_bid: y_bid, yes_bid_sz: y_bsz, yes_ask: y_ask, yes_ask_sz: y_asz,
+            no_bid:  n_bid, no_bid_sz:  n_bsz, no_ask:  n_ask, no_ask_sz:  n_asz,
+            yes_spr_bps: spread_bps(y_bid, y_ask),
+            no_spr_bps:  spread_bps(n_bid, n_ask),
+            yes_fee: poly_fee_pct(y_ask),
+            no_fee:  poly_fee_pct(n_ask),
+            strike, vol: snap.realized_volatility, ttx, ttx_total: 15.0,
+            delta: g.delta, gamma: g.gamma, vega: g.vega, theta: g.theta,
+            z, abs_z, z_dir: z_dir.to_string(),
+            z_flip:  hist.z_flipped,
+            z_flips: hist.z_flips,
+            exp_move:     em_pct,
+            exp_move_usd: strike * em_pct / 100.0,
+            dev_usd: snap.spot_price - strike,
+            dev_pct: (snap.spot_price - strike) / strike * 100.0,
+            regime:  classify_regime(y_ask).to_string(),
+            time_pct: 1.0 - (ttx / 15.0).clamp(0.0, 1.0),
+            // FIX 3: pct_above guarded by History::pct_above() which checks tick_count>0
+            pct_above: hist.pct_above(),
+            conf,
+            outcome:   outcome.to_string(),
+            out_conf:  o_conf,
+            vol_1s:  snap.vol_1sec,
+            vol_5s:  snap.vol_5sec,
+            vol_13s: snap.vol_13sec,
+            vol_34s: snap.vol_34sec,
+            vol_89s: snap.vol_89sec,
+            vol_regime:   snap.volatility_regime.clone(),
+            realized_vol: snap.realized_volatility,
+            sig_quality:  snap.signal_quality.clone(),
+            sig_conf:     snap.trade_confidence,
+            rtds_adv:         rtds_s.rtds_price_advantage_bps,
+            rtds_cl_dev:      rtds_s.rtds_chainlink_dev_bps,
+            // FIX 3: BPS-mode stale — sanity cap at 50bps to reject data errors
+            rtds_stale:       rtds_s.rtds_price_advantage_bps >= RTDS_ADV_THRESH
+                              && rtds_s.rtds_price_advantage_bps < 50.0,
+            rtds_bnc_lag:     rtds_s.rtds_binance_lag_ms,
+            rtds_cl_lag:      rtds_s.rtds_chainlink_lag_ms,
+            rtds_bnc_stale_ms: rtds_s.rtds_binance_stale_ms,
+            rtds_cl_stale_ms:  rtds_s.rtds_chainlink_stale_ms,
+            bnc_update_ms: snap.timestamp,
+            poly_yes_ms:   py_ms,
+            poly_no_ms:    pn_ms,
+            bvp_delta_ms:  bvp_raw,
+            obi:   obi_v,
+            cvd1m: hist.c1(), cvd3m: hist.c3(), cvd5m: hist.c5(),
+            sig_score: 0,
+        };
+        row.sig_score = calc_signal(&row);
+
+        let _ = temp_csv.ensure(&market.slug, &now);
+        let _ = temp_csv.write(&row);
+
+        terminal.draw(|f| draw(f, &row, &hist))?;
+        prev_btc = snap.spot_price;
 
         // Market rotation
         if resolved {
-            let since_last = now_ms.saturating_sub(last_fetch_ms);
-            if consecutive_failures == 0 || since_last >= 5_000 {
+            let since = now_ms.saturating_sub(last_fetch_ms);
+            if fail_n == 0 || since >= 5_000 {
                 last_fetch_ms = now_ms;
-                match fetch_next_market_after(&http, current_market.window_start).await {
+                match fetch_next_market_after(&http, market.window_start).await {
                     Ok(mut next) => {
-                        consecutive_failures = 0;
-                        let s = fetch_strike_with_retry(&http, &next).await?;
-                        next.strike_price = Some(s);
-                        next.strike_fetched = true;
-                        let mut new_rx = poly.clone().stream(vec![
-                            next.yes_token_id.clone(), next.no_token_id.clone()
-                        ]).await?;
-                        tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
-                        current_market = next;
+                        fail_n = 0;
+                        let s = fetch_strike(&http, &next).await?;
+                        next.strike_price = Some(s); next.strike_fetched = true;
+                        let mut nrx = poly.clone()
+                            .stream(vec![next.yes_token_id.clone(), next.no_token_id.clone()])
+                            .await?;
+                        tokio::spawn(async move { while let Some(_) = nrx.recv().await {} });
+                        hist    = History::default();
+                        market  = next;
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                     Err(_) => {
-                        consecutive_failures += 1;
-                        if consecutive_failures >= 10 { break; }
+                        fail_n += 1;
+                        if fail_n >= 10 { break; }
                     }
                 }
             }
