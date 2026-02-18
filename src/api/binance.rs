@@ -647,6 +647,26 @@ impl BinanceDataManager {
         Some(calc.is_bootstrapped())
     }
 
+    /// Get the volatility source path for a symbol
+    ///
+    /// This returns the actual data source that was used in the last volatility calculation:
+    /// - "REALTIME_FIBONACCI" - Using real-time WebSocket tick data
+    /// - "1MIN_FALLBACK" - Using 1-minute historical kline data
+    /// - "DEFAULT" - Using default volatility (insufficient data)
+    ///
+    /// # Arguments
+    /// * `symbol` - Trading pair symbol (case-insensitive)
+    ///
+    /// # Returns
+    /// * `Some(String)` - The volatility source path
+    /// * `None` - If symbol not found
+    pub async fn get_vol_source_path(&self, symbol: &str) -> Option<String> {
+        let upper_symbol = symbol.to_uppercase();
+        let vol_calculator = self.vol_calculators.get(&upper_symbol)?;
+        let calc = vol_calculator.lock().await;
+        Some(calc.get_vol_source_path().to_string())
+    }
+
     /// Get market snapshot including realized volatility for a symbol
     ///
     /// # Arguments

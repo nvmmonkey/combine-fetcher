@@ -144,6 +144,10 @@ pub struct FibonacciVolatilityCalculator {
 
     // Symbol for logging
     symbol: String,
+
+    // Volatility source path tracking
+    // Tracks which calculation path was actually used: "REALTIME_FIBONACCI" | "1MIN_FALLBACK" | "DEFAULT"
+    vol_source_path: String,
 }
 
 impl FibonacciVolatilityCalculator {
@@ -176,7 +180,7 @@ impl FibonacciVolatilityCalculator {
             min_price_change_bps: 0.1, // 0.1 bps = 0.0001% (ultra-sensitive to capture micro-movements)
 
             // Staleness threshold
-            stale_threshold_ms: 3000, // 3 seconds without updates = stale
+            stale_threshold_ms: 120_000, // P1 FIX: 2 minutes - matches 1-min granularity
 
             // Corrected annualization factors
             annualization_1sec: (SECONDS_PER_YEAR / 1.0).sqrt(), // ≈ 5,617
@@ -201,6 +205,8 @@ impl FibonacciVolatilityCalculator {
             cache_ttl_ms: 500,
 
             symbol: symbol.to_uppercase(),
+
+            vol_source_path: "DEFAULT".to_string(),
         }
     }
 
@@ -340,9 +346,9 @@ impl FibonacciVolatilityCalculator {
             return true;
         }
 
-        // CHANGED: 2 minutes instead of 3 seconds (fits 1-min granularity)
+        // P1 FIX: Use the configured threshold instead of hard-coded value
         if let Some(latest) = self.price_buffer_unified.back() {
-            return (current_time - latest.timestamp) > 120_000; // 2 minutes
+            return (current_time - latest.timestamp) > self.stale_threshold_ms;
         }
 
         true
@@ -561,6 +567,7 @@ impl FibonacciVolatilityCalculator {
         let use_realtime = fast_vol_raw.is_some() && !is_stale;
 
         if use_realtime {
+            self.vol_source_path = "REALTIME_FIBONACCI".to_string();
             self.cached_vol_fast = get_vol_with_fallback(fast_vol_raw, self.cached_vol_1min);
 
             self.cached_vol_1sec = self.cached_vol_fast;
@@ -612,6 +619,7 @@ impl FibonacciVolatilityCalculator {
             self.cached_vol_89sec
         );
         } else {
+            self.vol_source_path = "1MIN_FALLBACK".to_string();
             tracing::debug!(
                 "{} using 1-min fallback (stale={}, fast_vol={:?}, buffer_size={})",
                 self.symbol,
@@ -620,12 +628,15 @@ impl FibonacciVolatilityCalculator {
                 self.price_buffer_unified.len()
             );
 
-            self.cached_vol_fast = self.cached_vol_1min;
-            self.cached_vol_1sec = self.cached_vol_1min;
-            self.cached_vol_5sec = self.cached_vol_1min;
-            self.cached_vol_13sec = self.cached_vol_1min;
-            self.cached_vol_34sec = self.cached_vol_1min;
-            self.cached_vol_89sec = self.cached_vol_1min;
+            // P0 FIX: Apply production floor to fallback values
+            const MIN_PRODUCTION_VOL: f64 = 0.10; // 10% annualized floor for BTCUSDT
+            let vol_with_floor = self.cached_vol_1min.max(MIN_PRODUCTION_VOL);
+            self.cached_vol_fast = vol_with_floor;
+            self.cached_vol_1sec = vol_with_floor;
+            self.cached_vol_5sec = vol_with_floor;
+            self.cached_vol_13sec = vol_with_floor;
+            self.cached_vol_34sec = vol_with_floor;
+            self.cached_vol_89sec = vol_with_floor;
         }
 
         // Fibonacci-weighted blend for accurate estimate
@@ -635,6 +646,10 @@ impl FibonacciVolatilityCalculator {
             + self.cached_vol_34sec * self.fib_weights[3]
             + self.cached_vol_89sec * self.fib_weights[4])
             / self.fib_weight_sum;
+
+        // P0 FIX: Production floor on blended volatility (prevents z-score explosion)
+        const MIN_PRODUCTION_VOL: f64 = 0.10; // 10% annualized floor for BTCUSDT
+        self.cached_vol_blended = self.cached_vol_blended.max(MIN_PRODUCTION_VOL);
 
         self.cache_timestamp = current_time;
 
@@ -700,6 +715,16 @@ impl FibonacciVolatilityCalculator {
         } else {
             "NORMAL".to_string()
         }
+    }
+
+    /// Get the volatility source path that was used in the last calculate_all() call
+    ///
+    /// Returns one of:
+    /// - "REALTIME_FIBONACCI" - Using real-time WebSocket tick data
+    /// - "1MIN_FALLBACK" - Using 1-minute historical kline data
+    /// - "DEFAULT" - Using default volatility (insufficient data)
+    pub fn get_vol_source_path(&self) -> &str {
+        &self.vol_source_path
     }
 
     /// Get diagnostic information about the calculator state
@@ -887,7 +912,7 @@ mod tests {
         assert!(!calc.has_realtime_data());
         assert_eq!(calc.fib_weights, [1.0, 2.0, 3.0, 5.0, 8.0]);
         assert_eq!(calc.min_price_change_bps, 0.1);
-        assert_eq!(calc.stale_threshold_ms, 3000);
+        assert_eq!(calc.stale_threshold_ms, 120_000); // P1 FIX: Updated to 2 minutes
     }
 
     #[test]
@@ -1008,8 +1033,8 @@ mod tests {
         // Not stale immediately
         assert!(!calc.is_realtime_stale(base_time + 200));
 
-        // Stale after 3+ seconds
-        assert!(calc.is_realtime_stale(base_time + 4000));
+        // Stale after 2+ minutes (P1 FIX: updated threshold)
+        assert!(calc.is_realtime_stale(base_time + 130_000));
     }
 
     #[test]

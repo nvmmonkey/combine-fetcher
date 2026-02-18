@@ -775,17 +775,14 @@ async fn main() -> Result<()> {
             ""
         };
 
-        // Determine volatility data source
+        // Determine volatility data source - use actual path from calculator
         let vol_data_source = if snapshot.volatility_regime == "BOOTSTRAP" {
             "BOOTSTRAP".to_string()
-        } else if binance_manager
-            .is_volatility_ready("BTCUSDT")
-            .await
-            .unwrap_or(false)
-        {
-            "REALTIME".to_string()
         } else {
-            "1MIN_FALLBACK".to_string()
+            binance_manager
+                .get_vol_source_path("BTCUSDT")
+                .await
+                .unwrap_or_else(|| "UNKNOWN".to_string())
         };
 
         // Extract Polymarket prices
@@ -863,6 +860,11 @@ async fn main() -> Result<()> {
         csv_writer.write_record(&record)?;
 
         tick += 1;
+
+        // P0 FIX: Periodic 1min buffer refresh (every ~5 minutes)
+        if tick % (300 * 90) == 0 { // Every ~5 minutes at 90 ticks/sec
+            let _ = binance_manager.bootstrap_volatility("BTCUSDT", 10).await;
+        }
 
         if tick % 100 == 0 {
             info!(
