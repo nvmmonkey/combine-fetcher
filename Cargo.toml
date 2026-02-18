@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "multi_market_logger"
 path = "src/bin/multi_market_logger.rs"
 
+[[bin]]
+name = "dashboard"
+path = "src/bin/dashboard.rs"
+
 # [[bin]]
 # name = "test_binance_bootstrap"
 # path = "src/bin/test_binance_bootstrap.rs"
@@ -48,6 +52,10 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rust_decimal = "1.40.0"
+
+# dashboard
+ratatui   = "0.29"
+crossterm = "0.28"
 
 [features]
 default = []
