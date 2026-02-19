@@ -221,15 +221,60 @@ fn generate_hourly_filename(base_path: &str, hour_time: DateTime<Utc>) -> String
     format!("{}_{}.{}", stem, timestamp, extension)
 }
 
-/// Creates a new hourly CSV file with header
+/// Creates or re-opens an hourly CSV file.
+///
+/// SAFETY FIXES (v5.2):
+///   1. Uses append mode — restarts continue writing, no data overwritten.
+///      With O_APPEND, each write() syscall atomically seeks to EOF first,
+///      so even if two processes write simultaneously, records won't fuse.
+///   2. Only writes header if file is new/empty — no duplicate headers
+///   3. Uses .lock file to detect concurrent writers
 fn open_new_hourly_file(path: &str) -> Result<BufWriter<std::fs::File>> {
-    let file = OpenOptions::new().create(true).write(true).open(path)?;
+    // Concurrent-writer detection via lock file
+    let lock_path = format!("{}.lock", path);
+    let my_pid = std::process::id();
+
+    if let Ok(existing_pid) = std::fs::read_to_string(&lock_path) {
+        let existing_pid = existing_pid.trim();
+        // Check if the PID is still alive
+        let pid_alive = existing_pid
+            .parse::<u32>()
+            .ok()
+            .map(|pid| std::path::Path::new(&format!("/proc/{}", pid)).exists())
+            .unwrap_or(false);
+
+        if pid_alive && existing_pid != my_pid.to_string() {
+            warn!(
+                "⚠️  Lock file {} exists with PID {} (still alive). \
+                 Another logger may be writing to {}. Proceeding with append mode \
+                 (O_APPEND prevents corruption, but data may be duplicated).",
+                lock_path, existing_pid, path
+            );
+        }
+    }
+
+    // Write our PID to lock file
+    let _ = std::fs::write(&lock_path, my_pid.to_string());
+
+    // Check if file already has content (from a previous run this hour)
+    let file_exists_with_data = std::fs::metadata(path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true) // KEY FIX: O_APPEND makes each write() atomic to EOF
+        .open(path)?;
 
     let mut writer = BufWriter::with_capacity(64 * 1024, file);
 
-    // Write header
-    writeln!(writer, "{}", CsvRecord::csv_header())?;
-    writer.flush()?;
+    // Only write header if file is new or empty
+    if !file_exists_with_data {
+        writeln!(writer, "{}", CsvRecord::csv_header())?;
+        writer.flush()?;
+    } else {
+        info!("Appending to existing file: {} (header already present)", path);
+    }
 
     Ok(writer)
 }
@@ -277,6 +322,8 @@ impl HourlyCsvWriter {
         // Flush and close current file if exists
         if let Some(mut file) = self.current_file.take() {
             file.flush()?;
+            // Remove lock file for the old hour
+            let _ = std::fs::remove_file(format!("{}.lock", self.current_file_path));
             info!("Rotated CSV file: {}", self.current_file_path);
         }
 
@@ -294,9 +341,16 @@ impl HourlyCsvWriter {
     }
 
     /// Write a record to the current file
+    ///
+    /// Builds the full line (including newline) as a single String, then writes
+    /// it via write_all so the BufWriter flushes it as one write() syscall.
+    /// Combined with O_APPEND, this guarantees records are never fused even
+    /// if two processes write to the same file.
     fn write_record(&mut self, record: &CsvRecord) -> Result<()> {
         if let Some(ref mut file) = self.current_file {
-            writeln!(file, "{}", record.to_csv_line())?;
+            let mut line = record.to_csv_line();
+            line.push('\n');
+            file.write_all(line.as_bytes())?;
             file.flush()?;
         }
         Ok(())
@@ -306,6 +360,7 @@ impl HourlyCsvWriter {
     fn flush(&mut self) -> Result<()> {
         if let Some(mut file) = self.current_file.take() {
             file.flush()?;
+            let _ = std::fs::remove_file(format!("{}.lock", self.current_file_path));
             info!("Final CSV file flushed: {}", self.current_file_path);
         }
         Ok(())
@@ -363,7 +418,17 @@ pub struct Greeks {
 }
 
 fn calculate_greeks(spot: f64, strike: f64, ttx_min: f64, vol: f64) -> Greeks {
-    if ttx_min <= 0.01 || vol <= 0.0 || spot <= 0.0 || strike <= 0.0 {
+    // NaN guard: IEEE 754 NaN comparisons are always false, so
+    // `vol <= 0.0` passes when vol is NaN. Check explicitly.
+    if ttx_min <= 0.01
+        || vol <= 0.0
+        || spot <= 0.0
+        || strike <= 0.0
+        || vol.is_nan()
+        || spot.is_nan()
+        || strike.is_nan()
+        || ttx_min.is_nan()
+    {
         return Greeks {
             delta: if spot >= strike { 1.0 } else { 0.0 },
             ..Default::default()
@@ -379,11 +444,18 @@ fn calculate_greeks(spot: f64, strike: f64, ttx_min: f64, vol: f64) -> Greeks {
 
     let n_prime_d2 = norm_pdf(d2);
 
+    // Clamp to finite values — if d1/d2 overflow, norm_pdf returns ~0 but
+    // intermediate products can still be Inf/NaN
+    let delta = (n_prime_d2 / (spot * vol * sqrt_t)).clamp(0.0, 1.0);
+    let gamma = (n_prime_d2 * d1 / (spot * spot * vol * vol * t)).clamp(-1e6, 1e6);
+    let vega = (n_prime_d2 * sqrt_t * 0.01).clamp(-1e6, 1e6);
+    let theta = (-(spot * n_prime_d2 * vol) / (2.0 * sqrt_t) / 365.0).clamp(-1e6, 1e6);
+
     Greeks {
-        delta: (n_prime_d2 / (spot * vol * sqrt_t)).clamp(0.0, 1.0),
-        gamma: (n_prime_d2 * d1 / (spot * spot * vol * vol * t)).clamp(-1e6, 1e6),
-        vega: (n_prime_d2 * sqrt_t * 0.01).clamp(-1e6, 1e6),
-        theta: (-(spot * n_prime_d2 * vol) / (2.0 * sqrt_t) / 365.0).clamp(-1e6, 1e6),
+        delta: if delta.is_finite() { delta } else { 0.0 },
+        gamma: if gamma.is_finite() { gamma } else { 0.0 },
+        vega: if vega.is_finite() { vega } else { 0.0 },
+        theta: if theta.is_finite() { theta } else { 0.0 },
     }
 }
 
@@ -821,6 +893,12 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| "UNKNOWN".to_string())
         };
 
+        // Sanitize f64 values — prevent NaN/Inf from reaching CSV
+        // (NaN formats as "NaN" which breaks pandas numeric parsing)
+        fn sanitize(v: f64) -> f64 {
+            if v.is_finite() { v } else { 0.0 }
+        }
+
         // Extract Polymarket prices
         let yes_bid = yes_prices
             .as_ref()
@@ -851,7 +929,7 @@ async fn main() -> Result<()> {
             timestamp: now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
             market_slug: current_market.slug.clone(),
             binance_price: snapshot.spot_price,
-            binance_volume: snapshot.volume_1min,
+            binance_volume: sanitize(snapshot.volume_1min),
             yes_bid,
             yes_bid_size: yes_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
             yes_ask,
@@ -863,7 +941,7 @@ async fn main() -> Result<()> {
             time_to_open,
             time_to_expiry_minutes: ttx,
             strike_price: strike,
-            realized_volatility: snapshot.realized_volatility,
+            realized_volatility: sanitize(snapshot.realized_volatility),
             delta_yes: greeks.delta,
             gamma: greeks.gamma,
             vega: greeks.vega,
@@ -879,28 +957,28 @@ async fn main() -> Result<()> {
             latency_binance_poly_ms: latency_ms,
             binance_bid,
             binance_ask,
-            binance_spread_bps: snapshot.spread_bps,
-            vol_1sec: snapshot.vol_1sec,
-            vol_5sec: snapshot.vol_5sec,
-            vol_13sec: snapshot.vol_13sec,
-            vol_34sec: snapshot.vol_34sec,
-            vol_89sec: snapshot.vol_89sec,
+            binance_spread_bps: sanitize(snapshot.spread_bps),
+            vol_1sec: sanitize(snapshot.vol_1sec),
+            vol_5sec: sanitize(snapshot.vol_5sec),
+            vol_13sec: sanitize(snapshot.vol_13sec),
+            vol_34sec: sanitize(snapshot.vol_34sec),
+            vol_89sec: sanitize(snapshot.vol_89sec),
             volatility_regime: snapshot.volatility_regime.clone(),
-            volume_1sec: snapshot.volume_1sec,
+            volume_1sec: sanitize(snapshot.volume_1sec),
             volume_spike: snapshot.volume_spike,
             signal_quality: snapshot.signal_quality.clone(),
-            trade_confidence: snapshot.trade_confidence,
+            trade_confidence: sanitize(snapshot.trade_confidence),
             vol_data_source: vol_data_source.clone(),
-            yes_spread_bps: yes_spread,
-            no_spread_bps: no_spread,
+            yes_spread_bps: sanitize(yes_spread),
+            no_spread_bps: sanitize(no_spread),
 
             // RTDS price feed columns
-            rtds_binance_price: rtds.rtds_binance_price,
-            rtds_chainlink_price: rtds.rtds_chainlink_price,
-            rtds_binance_dev_bps: rtds.rtds_binance_dev_bps,
-            rtds_chainlink_dev_bps: rtds.rtds_chainlink_dev_bps,
-            rtds_price_advantage_bps: rtds.rtds_price_advantage_bps,
-            rtds_chainlink_binance_spread_bps: rtds.rtds_chainlink_binance_spread_bps,
+            rtds_binance_price: sanitize(rtds.rtds_binance_price),
+            rtds_chainlink_price: sanitize(rtds.rtds_chainlink_price),
+            rtds_binance_dev_bps: sanitize(rtds.rtds_binance_dev_bps),
+            rtds_chainlink_dev_bps: sanitize(rtds.rtds_chainlink_dev_bps),
+            rtds_price_advantage_bps: sanitize(rtds.rtds_price_advantage_bps),
+            rtds_chainlink_binance_spread_bps: sanitize(rtds.rtds_chainlink_binance_spread_bps),
             rtds_binance_lag_ms: rtds.rtds_binance_lag_ms,
             rtds_chainlink_lag_ms: rtds.rtds_chainlink_lag_ms,
             rtds_binance_stale_ms: rtds.rtds_binance_stale_ms,
