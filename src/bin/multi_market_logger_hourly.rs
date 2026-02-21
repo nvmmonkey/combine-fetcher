@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use combine_fetcher::api::binance::BinanceDataManager;
 use combine_fetcher::api::gamma;
+use combine_fetcher::api::market_events::MarketEventStream;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
 use combine_fetcher::api::rtds_tracker::RtdsTracker;
 use combine_fetcher::api::strike;
@@ -576,6 +577,14 @@ async fn main() -> Result<()> {
     println!("✅ RTDS tracker connected (Binance relay + Chainlink oracle)");
     tokio::time::sleep(Duration::from_secs(2)).await; // Wait for first RTDS updates
 
+    // Setup market lifecycle event stream (new_market + market_resolved via WS)
+    let market_events = MarketEventStream::new();
+    market_events.start(vec![
+        current_market.yes_token_id.clone(),
+        current_market.no_token_id.clone(),
+    ]);
+    println!("✅ Market event stream connected (new_market + market_resolved)");
+
     // Initialize hourly CSV writer
     let mut csv_writer = HourlyCsvWriter::new(csv_path.clone());
 
@@ -716,15 +725,27 @@ async fn main() -> Result<()> {
         let yes_spread = calculate_spread_bps(yes_bid, yes_ask);
         let no_spread = calculate_spread_bps(no_bid, no_ask);
 
-        // C6 FIX: Resolution detection using Polymarket bid prices + Gamma API fallback
-        // Primary: winning side trades at ~$1 near expiry
-        // Fallback: Gamma API outcomePrices for inconclusive cases
-        let outcome = if yes_bid >= 0.99 {
+        // Resolution detection: WS market_resolved → price-based → Gamma API fallback
+        let outcome = if let Some(resolved_event) = market_events.take_resolved() {
+            // Primary: WS market_resolved event (instant, no HTTP call)
+            info!(
+                "✅ WS resolution for {}: {}",
+                resolved_event.slug, resolved_event.winning_outcome
+            );
+            // Map Up/Down outcomes to YES/NO
+            if resolved_event.winning_outcome == "Up" {
+                "YES".to_string()
+            } else if resolved_event.winning_outcome == "Down" {
+                "NO".to_string()
+            } else {
+                resolved_event.winning_outcome
+            }
+        } else if yes_bid >= 0.99 {
             "YES".to_string()
         } else if no_bid >= 0.99 {
             "NO".to_string()
         } else if resolved {
-            // Market expired but prices not conclusive — check Gamma API cache
+            // Market expired but no WS event and prices not conclusive — Gamma API fallback
             let cached = gamma_outcome.lock().unwrap().clone();
             if let Some(result) = cached {
                 result
@@ -911,7 +932,37 @@ async fn main() -> Result<()> {
                     "🔄 Market {} expired (TTX={:.1}m) - rotating to next market...",
                     current_market.unique_id, ttx
                 );
-                match gamma::fetch_next_market(&http, current_market.window_start).await {
+
+                // Try WS new_market event first, fall back to Gamma API
+                let next_market_result = match market_events.take_new_market() {
+                    Some(nm) if nm.outcomes.len() == 2 && nm.asset_ids.len() == 2 => {
+                        info!("✅ WS new_market: {} (instant, no HTTP)", nm.slug);
+                        let next_ws = current_market.window_start + combine_fetcher::MARKET_WINDOW_SECONDS;
+                        let up_idx = nm.outcomes.iter().position(|o| o == "Up");
+                        let down_idx = nm.outcomes.iter().position(|o| o == "Down");
+                        let (yes_id, no_id) = match (up_idx, down_idx) {
+                            (Some(ui), Some(di)) => (nm.asset_ids[ui].clone(), nm.asset_ids[di].clone()),
+                            _ => (nm.asset_ids[0].clone(), nm.asset_ids[1].clone()),
+                        };
+                        Ok(gamma::MarketInfo {
+                            unique_id: nm.slug.clone(),
+                            slug: nm.slug,
+                            condition_id: String::new(),
+                            yes_token_id: yes_id,
+                            no_token_id: no_id,
+                            window_start: next_ws,
+                            window_end: next_ws + combine_fetcher::MARKET_WINDOW_SECONDS,
+                            strike_price: None,
+                            strike_fetched: false,
+                        })
+                    }
+                    _ => {
+                        // No WS event or bad shape — Gamma API fallback
+                        gamma::fetch_next_market(&http, current_market.window_start).await
+                    }
+                };
+
+                match next_market_result {
                     Ok(next_market) => {
                         info!("✅ Rotated to: {}", next_market.unique_id);
 
