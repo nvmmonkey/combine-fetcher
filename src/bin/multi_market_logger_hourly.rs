@@ -6,10 +6,10 @@
 //! NEW: 22 additional columns appended for latency/volatility/volume analysis
 //! NEW: Hourly CSV file rotation to prevent large file crashes
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
 use rust_decimal::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -19,12 +19,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
 use combine_fetcher::api::binance::BinanceDataManager;
+use combine_fetcher::api::gamma;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
-use combine_fetcher::api::rtds_tracker::{RtdsSnapshot, RtdsTracker};
-use combine_fetcher::{
-    CSV_RECORD_INTERVAL_SEC, GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS,
-    MINUTES_PER_YEAR, POLY_CRYPTO_API_URL, STRIKE_RETRY_INTERVAL_MS,
-};
+use combine_fetcher::api::rtds_tracker::RtdsTracker;
+use combine_fetcher::api::strike;
+use combine_fetcher::{CSV_RECORD_INTERVAL_SEC, HTTP_TIMEOUT_SECS, MINUTES_PER_YEAR};
 
 // ============================================================================
 // CSV RECORD - BACKWARD COMPATIBLE + ENHANCED
@@ -409,29 +408,6 @@ fn calculate_spread_bps(bid: f64, ask: f64) -> f64 {
 }
 
 // ============================================================================
-// MARKET INFO
-// ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct MarketInfo {
-    pub unique_id: String,
-    pub slug: String,
-    pub condition_id: String,
-    pub yes_token_id: String,
-    pub no_token_id: String,
-    pub window_start: i64,
-    pub window_end: i64,
-    pub strike_price: Option<f64>,
-    pub strike_fetched: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct PolymarketStrikeResponse {
-    #[serde(rename = "openPrice")]
-    open_price: Option<f64>,
-}
-
-// ============================================================================
 // GREEKS
 // ============================================================================
 
@@ -486,199 +462,6 @@ fn calculate_greeks(spot: f64, strike: f64, ttx_min: f64, vol: f64) -> Greeks {
 }
 
 // ============================================================================
-// MARKET FETCHING
-// ============================================================================
-
-async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
-    let now = Utc::now().timestamp();
-    let pos = now % MARKET_WINDOW_SECONDS;
-    let window_start = if pos < 60 {
-        ((now / MARKET_WINDOW_SECONDS) - 1) * MARKET_WINDOW_SECONDS
-    } else {
-        (now / MARKET_WINDOW_SECONDS) * MARKET_WINDOW_SECONDS
-    };
-    let window_end = window_start + MARKET_WINDOW_SECONDS;
-    let unique_id = format!("btc-updown-15m-{}", window_start);
-    let slug = format!("btc-updown-15m-{}", window_start);
-    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
-
-    info!("Fetching current market: {}", unique_id);
-    let resp = client
-        .get(&url)
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("Market fetch failed: {}", resp.status()));
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-    let markets = data["markets"]
-        .as_array()
-        .ok_or_else(|| anyhow!("No markets"))?;
-
-    for m in markets {
-        if !m["active"].as_bool().unwrap_or(false) {
-            continue;
-        }
-        let outcomes: Vec<String> =
-            serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
-        let tokens: Vec<String> =
-            serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
-        if outcomes.len() != 2 || tokens.len() != 2 {
-            continue;
-        }
-
-        let up_idx = outcomes.iter().position(|o| o == "Up");
-        let down_idx = outcomes.iter().position(|o| o == "Down");
-
-        if let (Some(ui), Some(di)) = (up_idx, down_idx) {
-            return Ok(MarketInfo {
-                unique_id,
-                slug, // Use the locally constructed value to ensure consistency with unique_id
-                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
-                yes_token_id: tokens[ui].clone(),
-                no_token_id: tokens[di].clone(),
-                window_start,
-                window_end,
-                strike_price: None,
-                strike_fetched: false,
-            });
-        }
-    }
-    Err(anyhow!("No valid BTC market for current window"))
-}
-
-async fn fetch_next_market_after(
-    client: &reqwest::Client,
-    current_window_start: i64,
-) -> Result<MarketInfo> {
-    let next_window_start = current_window_start + MARKET_WINDOW_SECONDS;
-    let window_end = next_window_start + MARKET_WINDOW_SECONDS;
-    let unique_id = format!("btc-updown-15m-{}", next_window_start);
-    let slug = format!("btc-updown-15m-{}", next_window_start);
-    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
-
-    info!("Fetching next market: {}", unique_id);
-    let resp = client
-        .get(&url)
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("Market fetch failed: {}", resp.status()));
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-    let markets = data["markets"]
-        .as_array()
-        .ok_or_else(|| anyhow!("No markets"))?;
-
-    for m in markets {
-        if !m["active"].as_bool().unwrap_or(false) {
-            continue;
-        }
-        let outcomes: Vec<String> =
-            serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
-        let tokens: Vec<String> =
-            serde_json::from_str(m["clobTokenIds"].as_str().unwrap_or("[]")).unwrap_or_default();
-        if outcomes.len() != 2 || tokens.len() != 2 {
-            continue;
-        }
-
-        let up_idx = outcomes.iter().position(|o| o == "Up");
-        let down_idx = outcomes.iter().position(|o| o == "Down");
-
-        if let (Some(ui), Some(di)) = (up_idx, down_idx) {
-            return Ok(MarketInfo {
-                unique_id,
-                slug, // Use the locally constructed value to ensure consistency with unique_id
-                condition_id: m["conditionId"].as_str().unwrap_or("").to_string(),
-                yes_token_id: tokens[ui].clone(),
-                no_token_id: tokens[di].clone(),
-                window_start: next_window_start,
-                window_end,
-                strike_price: None,
-                strike_fetched: false,
-            });
-        }
-    }
-    Err(anyhow!("No valid BTC market for next window"))
-}
-
-async fn fetch_strike_with_retry(client: &reqwest::Client, market: &MarketInfo) -> Result<f64> {
-    let start =
-        DateTime::from_timestamp(market.window_start, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
-    let end =
-        DateTime::from_timestamp(market.window_end, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
-
-    let url = format!(
-        "{}/crypto-price?symbol=BTC&eventStartTime={}&variant=fifteen&endDate={}",
-        POLY_CRYPTO_API_URL,
-        start.format("%Y-%m-%dT%H:%M:%SZ"),
-        end.format("%Y-%m-%dT%H:%M:%SZ")
-    );
-
-    debug!("Strike fetch URL for {}: {}", market.unique_id, url);
-
-    // Infinite retry with exponential backoff - keep trying until success
-    let mut attempt = 1u64;
-    let mut backoff_ms = STRIKE_RETRY_INTERVAL_MS;
-
-    loop {
-        debug!(
-            "Attempting strike fetch (attempt {}) for {}",
-            attempt, market.unique_id
-        );
-
-        match client
-            .get(&url)
-            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    match resp.json::<PolymarketStrikeResponse>().await {
-                        Ok(data) => {
-                            if let Some(price) = data.open_price {
-                                info!(
-                                    "✅ Strike fetched for {} on attempt {}: ${:.2}",
-                                    market.unique_id, attempt, price
-                                );
-                                return Ok(price);
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Attempt {} for {}: JSON parse error: {}",
-                                attempt, market.unique_id, e
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Attempt {} for {}: Request failed: {}",
-                    attempt, market.unique_id, e
-                );
-            }
-        }
-
-        // Exponential backoff: 500ms -> 1s -> 2s -> 4s -> ... (max 30s)
-        info!(
-            "⏳ Strike fetch not yet available, retrying in {}ms... (attempt {})",
-            backoff_ms, attempt
-        );
-        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-
-        backoff_ms = (backoff_ms * 2).min(500); // Cap at 5 seconds
-        attempt += 1;
-    }
-}
-
-// ============================================================================
 // HELPER: Truncate token ID for display
 // ============================================================================
 
@@ -688,52 +471,6 @@ pub fn truncate_id(id: &str, first: usize, last: usize) -> String {
         return id.to_string();
     }
     format!("{}...{}", &id[..first], &id[len - last..])
-}
-
-// ============================================================================
-// GAMMA API: Resolution Outcome Detection
-// ============================================================================
-
-/// Fetch market outcome from Gamma API (non-blocking fallback for resolution detection)
-///
-/// Reads `outcomePrices` from the event's market data to determine which outcome won.
-/// Returns "YES" if Up won, "NO" if Down won, or error if inconclusive.
-async fn fetch_gamma_outcome(client: &reqwest::Client, slug: &str) -> Result<String> {
-    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
-    let resp = client
-        .get(&url)
-        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("Gamma outcome fetch failed: {}", resp.status()));
-    }
-    let data: serde_json::Value = resp.json().await?;
-
-    if let Some(markets) = data["markets"].as_array() {
-        for m in markets {
-            let outcomes: Vec<String> =
-                serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
-            let outcome_prices_str = m["outcomePrices"].as_str().unwrap_or("[]");
-            let prices: Vec<String> =
-                serde_json::from_str(outcome_prices_str).unwrap_or_default();
-
-            if outcomes.len() >= 2 && prices.len() >= 2 {
-                let up_idx = outcomes.iter().position(|o| o == "Up");
-                let down_idx = outcomes.iter().position(|o| o == "Down");
-
-                if let (Some(ui), Some(di)) = (up_idx, down_idx) {
-                    if prices[ui] == "1" {
-                        return Ok("YES".to_string());
-                    } else if prices[di] == "1" {
-                        return Ok("NO".to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Err(anyhow!("No conclusive outcome from Gamma API for {}", slug))
 }
 
 // ============================================================================
@@ -782,7 +519,7 @@ async fn main() -> Result<()> {
         .build()?;
 
     println!("⏳ Fetching current market...");
-    let mut current_market = fetch_current_market(&http).await?;
+    let mut current_market = gamma::fetch_current_market(&http).await?;
     println!(
         "✅ Market: {} | YES: {}... | NO: {}...",
         current_market.unique_id,
@@ -809,7 +546,7 @@ async fn main() -> Result<()> {
         current_market.unique_id
     );
     println!("ℹ️  NOTE: Will retry indefinitely until strike price is available (exponential backoff, max 30s)");
-    let strike = fetch_strike_with_retry(&http, &current_market).await?;
+    let strike = strike::fetch_strike_with_retry(&http, &current_market, None).await?;
     current_market.strike_price = Some(strike);
     current_market.strike_fetched = true;
     println!("✅ Strike price: ${:.2} - ready to start logging", strike);
@@ -999,7 +736,7 @@ async fn main() -> Result<()> {
                 let slug = current_market.slug.clone();
                 let client = http.clone();
                 tokio::spawn(async move {
-                    match fetch_gamma_outcome(&client, &slug).await {
+                    match gamma::fetch_outcome(&client, &slug).await {
                         Ok(result) => {
                             info!("✅ Gamma API outcome for {}: {}", slug, result);
                             *cache.lock().unwrap() = Some(result);
@@ -1174,7 +911,7 @@ async fn main() -> Result<()> {
                     "🔄 Market {} expired (TTX={:.1}m) - rotating to next market...",
                     current_market.unique_id, ttx
                 );
-                match fetch_next_market_after(&http, current_market.window_start).await {
+                match gamma::fetch_next_market(&http, current_market.window_start).await {
                     Ok(next_market) => {
                         info!("✅ Rotated to: {}", next_market.unique_id);
 
@@ -1202,7 +939,7 @@ async fn main() -> Result<()> {
                             "⏳ Fetching strike price for {}...",
                             current_market.unique_id
                         );
-                        let strike = fetch_strike_with_retry(&http, &current_market).await?;
+                        let strike = strike::fetch_strike_with_retry(&http, &current_market, None).await?;
                         current_market.strike_price = Some(strike);
                         current_market.strike_fetched = true;
                         println!("✅ Strike price: ${:.2} - resuming data collection", strike);
