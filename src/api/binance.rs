@@ -187,7 +187,7 @@ pub struct BinanceDataManager {
     /// Whether a reconnection is in progress (aggTrade)
     reconnecting_agg: Arc<RwLock<bool>>,
     /// Volatility calculators per symbol: symbol -> calculator
-    vol_calculators: HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>,
+    vol_calculators: HashMap<String, Arc<RwLock<FibonacciVolatilityCalculator>>>,
     /// Volume trackers per symbol: symbol -> tracker
     volume_trackers: HashMap<String, Arc<Mutex<VolumeTracker>>>,
     /// Latest event times per symbol: symbol -> event_time_ms (from Binance streams)
@@ -355,7 +355,7 @@ impl BinanceDataManager {
         })?;
 
         // Lock and populate the 1-minute buffer
-        let mut calc = vol_calculator.lock().await;
+        let mut calc = vol_calculator.write().await;
         let mut loaded = 0;
 
         for kline in &klines {
@@ -457,7 +457,7 @@ impl BinanceDataManager {
         for symbol in &self.symbols {
             self.vol_calculators.insert(
                 symbol.clone(),
-                Arc::new(Mutex::new(FibonacciVolatilityCalculator::new(symbol))),
+                Arc::new(RwLock::new(FibonacciVolatilityCalculator::new(symbol))),
             );
             self.volume_trackers
                 .insert(symbol.clone(), Arc::new(Mutex::new(VolumeTracker::new())));
@@ -643,7 +643,7 @@ impl BinanceDataManager {
     pub async fn is_volatility_ready(&self, symbol: &str) -> Option<bool> {
         let upper_symbol = symbol.to_uppercase();
         let vol_calculator = self.vol_calculators.get(&upper_symbol)?;
-        let calc = vol_calculator.lock().await;
+        let calc = vol_calculator.read().await;
         Some(calc.is_bootstrapped())
     }
 
@@ -663,7 +663,7 @@ impl BinanceDataManager {
     pub async fn get_vol_source_path(&self, symbol: &str) -> Option<String> {
         let upper_symbol = symbol.to_uppercase();
         let vol_calculator = self.vol_calculators.get(&upper_symbol)?;
-        let calc = vol_calculator.lock().await;
+        let calc = vol_calculator.read().await;
         Some(calc.get_vol_source_path().to_string())
     }
 
@@ -701,10 +701,15 @@ impl BinanceDataManager {
         };
 
         // Get volatility calculator for this symbol (prices lock already released)
+        // Clone-compute pattern: clone under a brief read lock, then compute on the clone.
+        // This prevents lock contention between WS ingestion (add_price) and snapshot reads.
         let vol_calculator = self.vol_calculators.get(&upper_symbol)?;
         let (vol_1sec, vol_5sec, vol_13sec, vol_34sec, vol_89sec, realized_vol) = {
-            let mut vol_calc = vol_calculator.lock().await;
-            vol_calc.calculate_all(current_time)
+            let mut vol_calc_clone = {
+                let guard = vol_calculator.read().await;
+                (*guard).clone()
+            };
+            vol_calc_clone.calculate_all(current_time)
         };
 
         // Get volume tracker for this symbol (prices lock already released)
@@ -769,7 +774,7 @@ impl BinanceDataManager {
         reconnecting: Arc<RwLock<bool>>,
         _symbols: Vec<String>,
         _ws_url: String,
-        vol_calculators: HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>,
+        vol_calculators: HashMap<String, Arc<RwLock<FibonacciVolatilityCalculator>>>,
         event_times: Arc<RwLock<HashMap<String, u64>>>,
     ) {
         let mut reconnect_delay = tokio::time::Duration::from_secs(1);
@@ -777,11 +782,15 @@ impl BinanceDataManager {
 
         loop {
             // Check if another task is already reconnecting
+            // FIX H2: Use sleep+continue instead of return to prevent permanent exit
+            // if the flag gets stuck true (e.g., panic before reset)
             {
                 let mut reconnecting_guard = reconnecting.write().await;
                 if *reconnecting_guard {
-                    debug!("BookTicker reconnection already in progress, skipping");
-                    return;
+                    debug!("BookTicker reconnection already in progress, waiting to retry...");
+                    drop(reconnecting_guard);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
                 }
                 *reconnecting_guard = true;
             }
@@ -874,11 +883,15 @@ impl BinanceDataManager {
 
         loop {
             // Check if another task is already reconnecting
+            // FIX H2: Use sleep+continue instead of return to prevent permanent exit
+            // if the flag gets stuck true (e.g., panic before reset)
             {
                 let mut reconnecting_guard = reconnecting.write().await;
                 if *reconnecting_guard {
-                    debug!("AggTrade reconnection already in progress, skipping");
-                    return;
+                    debug!("AggTrade reconnection already in progress, waiting to retry...");
+                    drop(reconnecting_guard);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
                 }
                 *reconnecting_guard = true;
             }
@@ -963,7 +976,7 @@ impl BinanceDataManager {
     async fn handle_bookticker_message(
         text: &str,
         prices: &Arc<RwLock<HashMap<String, BinancePrice>>>,
-        vol_calculators: &HashMap<String, Arc<Mutex<FibonacciVolatilityCalculator>>>,
+        vol_calculators: &HashMap<String, Arc<RwLock<FibonacciVolatilityCalculator>>>,
         event_times: &Arc<RwLock<HashMap<String, u64>>>,
     ) -> Result<()> {
         // Parse the bookTicker message
@@ -1013,7 +1026,7 @@ impl BinanceDataManager {
         let mid_price = mid.to_f64().unwrap_or(0.0);
         if mid_price > 0.0 {
             if let Some(vol_calculator) = vol_calculators.get(&symbol) {
-                let mut vol_calc = vol_calculator.lock().await;
+                let mut vol_calc = vol_calculator.write().await;
                 vol_calc.add_price(event_time_i64, mid_price);
             }
         }
@@ -1062,10 +1075,17 @@ impl BinanceDataManager {
             .parse::<Decimal>()
             .map_err(|_| anyhow!("Invalid trade quantity: {}", trade.quantity))?;
 
-        // Store the Binance event time
+        // Store local receive time (consistent with bookticker_connection_loop)
+        // Both streams use local clock for event_times so the volatility calculator
+        // gets symmetric interval measurements. Binance exchange timestamps are still
+        // available via trade.event_time for RTDS edge calculations if needed.
+        let local_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         {
             let mut event_times_guard = event_times.write().await;
-            event_times_guard.insert(symbol.clone(), trade.event_time);
+            event_times_guard.insert(symbol.clone(), local_time);
         }
 
         // Calculate volume in USDT (price * quantity)

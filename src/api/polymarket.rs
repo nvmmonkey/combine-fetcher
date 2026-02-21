@@ -273,6 +273,10 @@ pub struct PolymarketOrderbookStream {
     total_ws_messages: Arc<AtomicU64>,
     /// Total API fallback calls made
     total_api_fallbacks: Arc<AtomicU64>,
+    /// Stream generation counter — incremented on each `stream()` call.
+    /// Background tasks capture their generation at spawn and exit when superseded,
+    /// preventing task accumulation across market rotations.
+    stream_generation: Arc<AtomicU64>,
 }
 
 impl PolymarketOrderbookStream {
@@ -289,6 +293,7 @@ impl PolymarketOrderbookStream {
             very_stale_count: Arc::new(AtomicU32::new(0)),
             total_ws_messages: Arc::new(AtomicU64::new(0)),
             total_api_fallbacks: Arc::new(AtomicU64::new(0)),
+            stream_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -492,11 +497,24 @@ impl PolymarketOrderbookStream {
     ///
     /// Returns a channel that receives price updates.
     /// Also spawns a REST API fallback task that polls when WebSocket data is stale.
+    ///
+    /// Calling this again (e.g. on market rotation) automatically cancels all
+    /// background tasks from the previous call via a generation counter. Old tasks
+    /// exit cleanly, dropping their `WsClient` instances and closing the underlying
+    /// WebSocket connections (no explicit unsubscribe needed).
     pub async fn stream(
         self: Arc<Self>,
         token_ids: Vec<String>,
     ) -> Result<mpsc::UnboundedReceiver<PolyPriceUpdate>> {
         let (tx, rx) = mpsc::unbounded_channel();
+
+        // Increment stream generation — all tasks from previous stream() calls
+        // detect the generation change and exit cleanly. This prevents background
+        // task accumulation across market rotations (C3 fix). When old tasks exit,
+        // they drop their WsClient instances, closing the underlying WebSocket
+        // connections (C5 fix — implicit unsubscribe via Drop).
+        let generation = self.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        info!("[STREAM] Starting generation {} — old tasks will self-terminate", generation);
 
         // Parse token IDs to U256
         let asset_ids: Vec<U256> = token_ids
@@ -522,13 +540,16 @@ impl PolymarketOrderbookStream {
         let price_reconnect_counter = Arc::clone(&self.price_reconnect_count);
         let last_price_reconnect_ts = Arc::clone(&self.last_price_reconnect_ms);
         let total_ws_msgs = Arc::clone(&self.total_ws_messages);
+        let price_gen_ref = Arc::clone(&self.stream_generation);
+        let price_gen = generation;
 
         tokio::spawn(async move {
             let mut reconnect_attempt = 0u32;
             let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
             info!(
-                "[PRICE_STREAM] Starting for {} tokens",
+                "[PRICE_STREAM] Starting gen {} for {} tokens",
+                price_gen,
                 asset_ids_price.len()
             );
 
@@ -537,6 +558,12 @@ impl PolymarketOrderbookStream {
                 // Check if sender is still alive
                 if tx_clone.is_closed() {
                     info!("[PRICE_STREAM] Channel closed, exiting");
+                    break;
+                }
+
+                // Check if superseded by newer stream() call
+                if price_gen_ref.load(Ordering::Relaxed) != price_gen {
+                    info!("[PRICE_STREAM] Generation {} superseded, exiting", price_gen);
                     break;
                 }
 
@@ -560,7 +587,7 @@ impl PolymarketOrderbookStream {
                     }
                 }
 
-                match ws_client.subscribe_prices(asset_ids_price.clone()) {
+                match ws_client.subscribe_best_bid_ask(asset_ids_price.clone()) {
                     Ok(price_stream) => {
                         // Successfully connected
                         let now_ms = chrono::Utc::now().timestamp_millis();
@@ -591,69 +618,66 @@ impl PolymarketOrderbookStream {
                         // Process stream until it ends
                         loop {
                             match stream.next().await {
-                                Some(Ok(price_change)) => {
+                                Some(Ok(bba)) => {
                                     // Track total WS messages
                                     total_ws_msgs.fetch_add(1, Ordering::Relaxed);
 
-                                    // Process each price change in the batch
-                                    for change in &price_change.price_changes {
-                                        let change_token_id = change.asset_id.to_string();
-                                        let change_token_id_hex = format!("{:#x}", change.asset_id);
+                                    // M1: BestBidAsk is per-token (not batched like PriceChange)
+                                    let token_id = bba.asset_id.to_string();
+                                    let token_id_hex = format!("{:#x}", bba.asset_id);
 
-                                        // Update prices from PriceChange
-                                        let mut prices = prices_clone
-                                            .entry(change_token_id.clone())
-                                            .or_insert_with(|| {
-                                                TokenPrices::new(change_token_id.clone())
-                                            });
+                                    let mut prices = prices_clone
+                                        .entry(token_id.clone())
+                                        .or_insert_with(|| {
+                                            TokenPrices::new(token_id.clone())
+                                        });
 
-                                        prices.best_bid = change.best_bid;
-                                        prices.best_ask = change.best_ask;
-                                        prices.last_trade = change.price.to_f64();
+                                    // BestBidAsk fields are non-optional Decimal
+                                    prices.best_bid = Some(bba.best_bid);
+                                    prices.best_ask = Some(bba.best_ask);
+                                    // Note: BestBidAsk doesn't provide last_trade — keep existing value
 
-                                        // Calculate mid price
-                                        prices.mid_price = match (prices.best_bid, prices.best_ask)
-                                        {
-                                            (Some(bid), Some(ask)) => {
-                                                Some((bid + ask) / Decimal::from(2))
-                                            }
-                                            (Some(bid), None) => Some(bid),
-                                            (None, Some(ask)) => Some(ask),
-                                            _ => None,
-                                        };
+                                    // Calculate mid price (both always present from BestBidAsk)
+                                    prices.mid_price = Some(
+                                        (bba.best_bid + bba.best_ask) / Decimal::from(2)
+                                    );
 
-                                        // prices.last_update_ms = price_change.timestamp;
-                                        let local_now_ms = std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap()
-                                            .as_millis()
-                                            as i64;
+                                    let local_now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis()
+                                        as i64;
 
-                                        prices.last_update_ms = local_now_ms;
-                                        prices.last_ws_update_ms = price_change.timestamp; // Track WS updates separately
-                                        prices.ws_connected = true;
-                                        prices.consecutive_errors = 0;
-                                        prices.ws_message_count += 1; // Increment per-token message count
+                                    prices.last_update_ms = local_now_ms;
+                                    prices.last_ws_update_ms = bba.timestamp;
+                                    prices.ws_connected = true;
+                                    prices.consecutive_errors = 0;
+                                    prices.ws_message_count += 1;
 
-                                        // Send update
-                                        let update = PolyPriceUpdate {
-                                            token_id: change_token_id.clone(),
-                                            best_bid: prices.best_bid,
-                                            best_ask: prices.best_ask,
-                                            mid_price: prices.mid_price,
-                                        };
+                                    // Send update
+                                    let update = PolyPriceUpdate {
+                                        token_id: token_id.clone(),
+                                        best_bid: prices.best_bid,
+                                        best_ask: prices.best_ask,
+                                        mid_price: prices.mid_price,
+                                    };
 
-                                        if let Err(e) = tx_clone.send(update) {
-                                            error!("Failed to send price update: {:?}", e);
-                                            return;
-                                        }
+                                    if let Err(e) = tx_clone.send(update) {
+                                        error!("Failed to send price update: {:?}", e);
+                                        return;
+                                    }
 
-                                        debug!(
-                                            "[PRICE_STREAM] 📥 WS update for {}: bid={:?} ask={:?}",
-                                            change_token_id_hex,
-                                            change.best_bid.and_then(|b| b.to_f64()),
-                                            change.best_ask.and_then(|a| a.to_f64())
-                                        );
+                                    debug!(
+                                        "[PRICE_STREAM] WS update for {}: bid={:.4} ask={:.4}",
+                                        token_id_hex,
+                                        bba.best_bid.to_f64().unwrap_or(0.0),
+                                        bba.best_ask.to_f64().unwrap_or(0.0)
+                                    );
+
+                                    // Exit promptly if superseded by newer stream() call
+                                    if price_gen_ref.load(Ordering::Relaxed) != price_gen {
+                                        info!("[PRICE_STREAM] Generation {} superseded mid-stream, exiting", price_gen);
+                                        return;
                                     }
                                 }
                                 Some(Err(e)) => {
@@ -722,6 +746,12 @@ impl PolymarketOrderbookStream {
                 );
                 tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
 
+                // Re-check generation after sleep — exit early if superseded
+                if price_gen_ref.load(Ordering::Relaxed) != price_gen {
+                    info!("[PRICE_STREAM] Generation {} superseded during backoff, exiting", price_gen);
+                    break;
+                }
+
                 // Calculate next delay with exponential backoff
                 reconnect_delay_ms = std::cmp::min(
                     (reconnect_delay_ms as f64 * RECONNECT_BACKOFF_MULTIPLIER) as u64,
@@ -730,7 +760,7 @@ impl PolymarketOrderbookStream {
                 reconnect_attempt += 1;
             }
 
-            error!("[PRICE_STREAM] Task exited");
+            info!("[PRICE_STREAM] Gen {} task exited", price_gen);
         });
 
         // Spawn task to handle orderbook updates with reconnection logic
@@ -740,17 +770,25 @@ impl PolymarketOrderbookStream {
         let book_reconnect_counter = Arc::clone(&self.book_reconnect_count);
         let last_book_reconnect_ts = Arc::clone(&self.last_book_reconnect_ms);
         let total_ws_msgs_book = Arc::clone(&self.total_ws_messages);
+        let book_gen_ref = Arc::clone(&self.stream_generation);
+        let book_gen = generation;
 
         tokio::spawn(async move {
             let mut reconnect_attempt = 0u32;
             let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
-            info!("[BOOK_STREAM] Starting for {} tokens", asset_ids_book.len());
+            info!("[BOOK_STREAM] Starting gen {} for {} tokens", book_gen, asset_ids_book.len());
 
             // Outer reconnection loop
             loop {
                 if tx_book.is_closed() {
                     info!("[BOOK_STREAM] Channel closed, exiting");
+                    break;
+                }
+
+                // Check if superseded by newer stream() call
+                if book_gen_ref.load(Ordering::Relaxed) != book_gen {
+                    info!("[BOOK_STREAM] Generation {} superseded, exiting", book_gen);
                     break;
                 }
 
@@ -875,6 +913,12 @@ impl PolymarketOrderbookStream {
                                     debug!("[BOOK_STREAM] 📥 WS update for {}: bid_size={:.1}, ask_size={:.1}",
                                         token_id_hex, bid_size, ask_size
                                     );
+
+                                    // Exit promptly if superseded by newer stream() call
+                                    if book_gen_ref.load(Ordering::Relaxed) != book_gen {
+                                        info!("[BOOK_STREAM] Generation {} superseded mid-stream, exiting", book_gen);
+                                        return;
+                                    }
                                 }
                                 Some(Err(e)) => {
                                     error!("[BOOK_STREAM] ❌ Stream error: {}", e);
@@ -932,6 +976,12 @@ impl PolymarketOrderbookStream {
                 );
                 tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
 
+                // Re-check generation after sleep
+                if book_gen_ref.load(Ordering::Relaxed) != book_gen {
+                    info!("[BOOK_STREAM] Generation {} superseded during backoff, exiting", book_gen);
+                    break;
+                }
+
                 reconnect_delay_ms = std::cmp::min(
                     (reconnect_delay_ms as f64 * RECONNECT_BACKOFF_MULTIPLIER) as u64,
                     MAX_RECONNECT_DELAY_MS,
@@ -939,24 +989,34 @@ impl PolymarketOrderbookStream {
                 reconnect_attempt += 1;
             }
 
-            error!("[BOOK_STREAM] Task exited");
+            info!("[BOOK_STREAM] Gen {} task exited", book_gen);
         });
 
         // Spawn health monitoring task
         let very_stale_counter = Arc::clone(&self.very_stale_count);
         let stream_clone = Arc::clone(&self);
+        let health_gen_ref = Arc::clone(&self.stream_generation);
+        let health_gen = generation;
 
         tokio::spawn(async move {
             let mut health_ticker = interval(Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS));
             let mut tick_count = 0u32;
 
             info!(
-                "[HEALTH_MONITOR] Started (interval: {}s)",
+                "[HEALTH_MONITOR] Started gen {} (interval: {}s)",
+                health_gen,
                 HEALTH_CHECK_INTERVAL_SECS
             );
 
             loop {
                 health_ticker.tick().await;
+
+                // Exit if superseded by newer stream() call
+                if health_gen_ref.load(Ordering::Relaxed) != health_gen {
+                    info!("[HEALTH_MONITOR] Generation {} superseded, exiting", health_gen);
+                    break;
+                }
+
                 tick_count += 1;
 
                 // Get detailed status for each token
@@ -1022,6 +1082,8 @@ impl PolymarketOrderbookStream {
         let token_ids_fallback = Arc::clone(&self.token_ids);
         let tx_fallback = tx.clone();
         let total_api_calls = Arc::clone(&self.total_api_fallbacks);
+        let rest_gen_ref = Arc::clone(&self.stream_generation);
+        let rest_gen = generation;
 
         tokio::spawn(async move {
             let clob_client = match ClobClient::new(CLOB_API_URL, Config::default()) {
@@ -1034,15 +1096,31 @@ impl PolymarketOrderbookStream {
 
             let mut ticker = interval(Duration::from_secs(REST_FALLBACK_INTERVAL_SECS));
             let mut last_log_ms = 0i64;
+            // M3: Rate limiting / backoff state
+            let mut consecutive_rest_failures: u32 = 0;
+            let mut rest_backoff_until_ms: i64 = 0;
 
             info!(
-                "[REST_FALLBACK] Started (interval: {}s, using midpoint + last_trade APIs)",
+                "[REST_FALLBACK] Started gen {} (interval: {}s, using midpoint + last_trade APIs)",
+                rest_gen,
                 REST_FALLBACK_INTERVAL_SECS
             );
 
             loop {
                 ticker.tick().await;
+
+                // Exit if superseded by newer stream() call
+                if rest_gen_ref.load(Ordering::Relaxed) != rest_gen {
+                    info!("[REST_FALLBACK] Generation {} superseded, exiting", rest_gen);
+                    break;
+                }
+
                 let now_ms = chrono::Utc::now().timestamp_millis();
+
+                // M3: Skip if in rate-limit backoff period
+                if now_ms < rest_backoff_until_ms {
+                    continue;
+                }
 
                 let token_ids_to_check = match token_ids_fallback.lock() {
                     Ok(ids) => ids.clone(),
@@ -1084,7 +1162,7 @@ impl PolymarketOrderbookStream {
                         async move {
                             // Fetch midpoint from REST API
                             let mid_req = MidpointRequest::builder().token_id(token_id).build();
-                            let result = match clob_client.midpoint(&mid_req).await {
+                            let result: Result<(String, f64, f64), String> = match clob_client.midpoint(&mid_req).await {
                                 Ok(mid_resp) => {
                                     if let Some(mid) = mid_resp.mid.to_f64() {
                                         // Fetch last trade price from REST API
@@ -1098,12 +1176,13 @@ impl PolymarketOrderbookStream {
                                             .and_then(|t| t.price.to_f64())
                                             .unwrap_or(0.0);
 
-                                        Some((token_id_str.clone(), mid, last_trade))
+                                        Ok((token_id_str.clone(), mid, last_trade))
                                     } else {
-                                        None
+                                        Err("midpoint response had no valid price".to_string())
                                     }
                                 }
-                                Err(_) => None,
+                                // M3: Capture error details for 429/425 detection
+                                Err(e) => Err(format!("{}", e)),
                             };
                             result
                         }
@@ -1114,46 +1193,92 @@ impl PolymarketOrderbookStream {
 
                 let mut tokens_using_fallback = vec![];
 
+                let mut rest_errors: Vec<String> = Vec::new();
+
                 for result in results {
-                    if let Some((token_id_str, mid, last_trade)) = result {
-                        total_api_calls.fetch_add(1, Ordering::Relaxed);
+                    match result {
+                        Ok((token_id_str, mid, last_trade)) => {
+                            total_api_calls.fetch_add(1, Ordering::Relaxed);
 
-                        let mut prices = prices_fallback
-                            .entry(token_id_str.clone())
-                            .or_insert_with(|| TokenPrices::new(token_id_str.clone()));
+                            let mut prices = prices_fallback
+                                .entry(token_id_str.clone())
+                                .or_insert_with(|| TokenPrices::new(token_id_str.clone()));
 
-                        prices.mid_price = Some(
-                            rust_decimal::Decimal::from_f64(mid)
-                                .unwrap_or(rust_decimal::Decimal::ZERO),
-                        );
-                        prices.last_trade = Some(last_trade);
-                        prices.last_update_ms = now_ms;
-                        prices.api_fallback_count += 1;
-                        // Note: ws_connected remains false/unchanged, indicating API fallback is active
+                            let mid_dec = rust_decimal::Decimal::from_f64(mid)
+                                .unwrap_or(rust_decimal::Decimal::ZERO);
+                            prices.mid_price = Some(mid_dec);
+                            prices.last_trade = Some(last_trade);
 
-                        let update = PolyPriceUpdate {
-                            token_id: token_id_str.clone(),
-                            best_bid: prices.best_bid,
-                            best_ask: prices.best_ask,
-                            mid_price: prices.mid_price,
-                        };
+                            // M6: Update synthetic best_bid/best_ask from REST midpoint
+                            // Prevents stale WS bid/ask values from persisting when only REST is working
+                            let half_spread = Decimal::from_str("0.0005").unwrap();
+                            prices.best_bid = Some(mid_dec - half_spread);
+                            prices.best_ask = Some(mid_dec + half_spread);
 
-                        if let Err(e) = tx_fallback.send(update) {
-                            debug!("[REST_FALLBACK] Failed to send: {:?}", e);
+                            prices.last_update_ms = now_ms;
+                            prices.api_fallback_count += 1;
+
+                            let update = PolyPriceUpdate {
+                                token_id: token_id_str.clone(),
+                                best_bid: prices.best_bid,
+                                best_ask: prices.best_ask,
+                                mid_price: prices.mid_price,
+                            };
+
+                            if let Err(e) = tx_fallback.send(update) {
+                                debug!("[REST_FALLBACK] Failed to send: {:?}", e);
+                            }
+
+                            let short_id = if token_id_str.len() > 8 {
+                                &token_id_str[..8]
+                            } else {
+                                &token_id_str
+                            };
+                            tokens_using_fallback.push(short_id.to_string());
+
+                            debug!(
+                                "[REST_FALLBACK] API update for {}: mid={:.4} bid={:.4} ask={:.4}",
+                                short_id, mid,
+                                (mid - 0.0005), (mid + 0.0005)
+                            );
                         }
-
-                        let short_id = if token_id_str.len() > 8 {
-                            &token_id_str[..8]
-                        } else {
-                            &token_id_str
-                        };
-                        tokens_using_fallback.push(short_id.to_string());
-
-                        debug!(
-                            "[REST_FALLBACK] 🌐 API update for {}: mid={:.4}",
-                            short_id, mid
-                        );
+                        Err(err_msg) => {
+                            rest_errors.push(err_msg);
+                        }
                     }
+                }
+
+                // M3: Update rate-limit / backoff state
+                if !rest_errors.is_empty() && tokens_using_fallback.is_empty() {
+                    // All tokens failed — increment consecutive failure count
+                    consecutive_rest_failures += 1;
+                    let has_429 = rest_errors.iter().any(|e| e.contains("429"));
+                    let has_425 = rest_errors.iter().any(|e| e.contains("425"));
+
+                    let backoff_ms: i64 = if has_429 {
+                        // Exponential backoff for rate limiting (double each time, max 60s)
+                        let secs = ((REST_FALLBACK_INTERVAL_SECS as u64) * 2u64.pow(consecutive_rest_failures.min(5))).min(60);
+                        warn!("[REST_FALLBACK] HTTP 429 rate limited, backing off {}s (failures: {})",
+                            secs, consecutive_rest_failures);
+                        secs as i64 * 1000
+                    } else if has_425 {
+                        warn!("[REST_FALLBACK] HTTP 425 matching engine restart, backing off 30s");
+                        30_000
+                    } else if consecutive_rest_failures >= 3 {
+                        let secs = ((REST_FALLBACK_INTERVAL_SECS as u64) * 2u64.pow((consecutive_rest_failures - 2).min(5))).min(60);
+                        warn!("[REST_FALLBACK] {} consecutive failures, backing off {}s",
+                            consecutive_rest_failures, secs);
+                        secs as i64 * 1000
+                    } else {
+                        0
+                    };
+
+                    if backoff_ms > 0 {
+                        rest_backoff_until_ms = now_ms + backoff_ms;
+                    }
+                } else if !tokens_using_fallback.is_empty() {
+                    // At least some tokens succeeded — reset failure count
+                    consecutive_rest_failures = 0;
                 }
 
                 // Log fallback usage (but not too frequently - once per 30s)
@@ -1201,6 +1326,7 @@ impl Clone for PolymarketOrderbookStream {
             very_stale_count: Arc::clone(&self.very_stale_count),
             total_ws_messages: Arc::clone(&self.total_ws_messages),
             total_api_fallbacks: Arc::clone(&self.total_api_fallbacks),
+            stream_generation: Arc::clone(&self.stream_generation),
         }
     }
 }

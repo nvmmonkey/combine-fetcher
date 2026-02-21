@@ -35,7 +35,7 @@
 
 use rust_decimal::prelude::ToPrimitive;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -46,44 +46,57 @@ use tracing::{debug, info, warn};
 // RTDS PRICE DATA
 // ============================================================================
 
-/// Thread-safe storage for a single RTDS price source
+/// Grouped price data that must be read/written atomically to prevent torn reads.
+///
+/// Previously these were 3 independent atomics — a reader could see a new price
+/// with an old timestamp during a concurrent write, producing spurious deviation
+/// spikes that could trigger false trade signals.
+#[derive(Clone, Copy)]
+struct RtdsPriceData {
+    price_bits: i64,
+    source_ts_ms: i64,
+    received_ts_ms: i64,
+}
+
+/// Thread-safe storage for a single RTDS price source.
+///
+/// Uses RwLock to guarantee atomic snapshot reads — all three fields
+/// (price, source_ts, received_ts) are always consistent with each other.
+/// The update_count is independent and stays as a plain atomic.
 struct RtdsPriceSource {
-    /// Latest price (stored as f64 bits for atomic access)
-    price_bits: AtomicI64,
-    /// Timestamp (ms) from RTDS payload — source clock (Binance or Chainlink)
-    source_ts_ms: AtomicI64,
-    /// Timestamp (ms) when WE received it — local clock
-    received_ts_ms: AtomicI64,
-    /// Count of updates received
+    /// Price + timestamps grouped under a single lock to prevent torn reads
+    data: RwLock<RtdsPriceData>,
+    /// Count of updates received (independent, no consistency requirement)
     update_count: AtomicI64,
 }
 
 impl RtdsPriceSource {
     fn new() -> Self {
         Self {
-            price_bits: AtomicI64::new(0),
-            source_ts_ms: AtomicI64::new(0),
-            received_ts_ms: AtomicI64::new(0),
+            data: RwLock::new(RtdsPriceData {
+                price_bits: 0,
+                source_ts_ms: 0,
+                received_ts_ms: 0,
+            }),
             update_count: AtomicI64::new(0),
         }
     }
 
     #[inline]
     fn store(&self, price: f64, source_ts: i64, received_ts: i64) {
-        self.price_bits
-            .store(price.to_bits() as i64, Ordering::Release);
-        self.source_ts_ms.store(source_ts, Ordering::Release);
-        self.received_ts_ms.store(received_ts, Ordering::Release);
+        let mut data = self.data.write().unwrap();
+        data.price_bits = price.to_bits() as i64;
+        data.source_ts_ms = source_ts;
+        data.received_ts_ms = received_ts;
+        drop(data);
         self.update_count.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
     fn load(&self) -> (f64, i64, i64) {
-        let bits = self.price_bits.load(Ordering::Acquire) as u64;
-        let price = f64::from_bits(bits);
-        let source_ts = self.source_ts_ms.load(Ordering::Acquire);
-        let received_ts = self.received_ts_ms.load(Ordering::Acquire);
-        (price, source_ts, received_ts)
+        let data = self.data.read().unwrap();
+        let price = f64::from_bits(data.price_bits as u64);
+        (price, data.source_ts_ms, data.received_ts_ms)
     }
 
     #[inline]

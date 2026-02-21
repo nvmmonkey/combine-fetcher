@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 
@@ -285,6 +286,8 @@ struct HourlyCsvWriter {
     current_file: Option<BufWriter<std::fs::File>>,
     current_file_path: String,
     current_hour: u32,
+    records_since_flush: u32,
+    last_flush_ms: i64,
 }
 
 impl HourlyCsvWriter {
@@ -294,6 +297,8 @@ impl HourlyCsvWriter {
             current_file: None,
             current_file_path: String::new(),
             current_hour: u32::MAX, // Sentinel value indicating uninitialized
+            records_since_flush: 0,
+            last_flush_ms: 0,
         }
     }
 
@@ -332,6 +337,13 @@ impl HourlyCsvWriter {
         self.current_file_path = new_path.clone();
         self.current_hour = now.hour();
 
+        // Reset flush counters for new file
+        self.records_since_flush = 0;
+        self.last_flush_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
         // Open new file
         self.current_file = Some(open_new_hourly_file(&new_path)?);
 
@@ -346,12 +358,26 @@ impl HourlyCsvWriter {
     /// it via write_all so the BufWriter flushes it as one write() syscall.
     /// Combined with O_APPEND, this guarantees records are never fused even
     /// if two processes write to the same file.
+    ///
+    /// Flushes every 100 records OR every 1 second, whichever comes first.
+    /// This avoids 100+ flush syscalls/sec in event-driven mode (interval=0).
     fn write_record(&mut self, record: &CsvRecord) -> Result<()> {
         if let Some(ref mut file) = self.current_file {
             let mut line = record.to_csv_line();
             line.push('\n');
             file.write_all(line.as_bytes())?;
-            file.flush()?;
+
+            self.records_since_flush += 1;
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+
+            if self.records_since_flush >= 100 || (now_ms - self.last_flush_ms) >= 1000 {
+                file.flush()?;
+                self.records_since_flush = 0;
+                self.last_flush_ms = now_ms;
+            }
         }
         Ok(())
     }
@@ -665,6 +691,52 @@ pub fn truncate_id(id: &str, first: usize, last: usize) -> String {
 }
 
 // ============================================================================
+// GAMMA API: Resolution Outcome Detection
+// ============================================================================
+
+/// Fetch market outcome from Gamma API (non-blocking fallback for resolution detection)
+///
+/// Reads `outcomePrices` from the event's market data to determine which outcome won.
+/// Returns "YES" if Up won, "NO" if Down won, or error if inconclusive.
+async fn fetch_gamma_outcome(client: &reqwest::Client, slug: &str) -> Result<String> {
+    let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
+    let resp = client
+        .get(&url)
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Gamma outcome fetch failed: {}", resp.status()));
+    }
+    let data: serde_json::Value = resp.json().await?;
+
+    if let Some(markets) = data["markets"].as_array() {
+        for m in markets {
+            let outcomes: Vec<String> =
+                serde_json::from_str(m["outcomes"].as_str().unwrap_or("[]")).unwrap_or_default();
+            let outcome_prices_str = m["outcomePrices"].as_str().unwrap_or("[]");
+            let prices: Vec<String> =
+                serde_json::from_str(outcome_prices_str).unwrap_or_default();
+
+            if outcomes.len() >= 2 && prices.len() >= 2 {
+                let up_idx = outcomes.iter().position(|o| o == "Up");
+                let down_idx = outcomes.iter().position(|o| o == "Down");
+
+                if let (Some(ui), Some(di)) = (up_idx, down_idx) {
+                    if prices[ui] == "1" {
+                        return Ok("YES".to_string());
+                    } else if prices[di] == "1" {
+                        return Ok("NO".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Err(anyhow!("No conclusive outcome from Gamma API for {}", slug))
+}
+
+// ============================================================================
 // MAIN - ENHANCED DATA COLLECTION LOOP WITH HOURLY ROTATION
 // ============================================================================
 
@@ -714,8 +786,8 @@ async fn main() -> Result<()> {
     println!(
         "✅ Market: {} | YES: {}... | NO: {}...",
         current_market.unique_id,
-        &current_market.yes_token_id[..10],
-        &current_market.no_token_id[..10]
+        truncate_id(&current_market.yes_token_id, 10, 0),
+        truncate_id(&current_market.no_token_id, 10, 0)
     );
 
     // Setup Binance
@@ -787,10 +859,23 @@ async fn main() -> Result<()> {
     let mut last_fetch_attempt_ms: i64 = 0;
     const FETCH_RETRY_COOLDOWN_MS: i64 = 5000;
 
+    // H3 FIX: Signal handling — graceful shutdown on SIGINT
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("🛑 Received SIGINT, shutting down gracefully...");
+        shutdown_signal.store(true, Ordering::SeqCst);
+    });
+
+    // C6: Gamma API outcome cache (non-blocking resolution detection)
+    let gamma_outcome: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let gamma_fetch_in_progress = Arc::new(AtomicBool::new(false));
+
     info!("Starting enhanced data collection with hourly rotation...");
 
     loop {
-        if SystemTime::now() >= end_time {
+        if SystemTime::now() >= end_time || shutdown.load(Ordering::SeqCst) {
             break;
         }
 
@@ -873,33 +958,7 @@ async fn main() -> Result<()> {
             snapshot.realized_volatility,
         );
 
-        let outcome = if resolved {
-            if snapshot.spot_price >= strike {
-                "YES"
-            } else {
-                "NO"
-            }
-        } else {
-            ""
-        };
-
-        // Determine volatility data source - use actual path from calculator
-        let vol_data_source = if snapshot.volatility_regime == "BOOTSTRAP" {
-            "BOOTSTRAP".to_string()
-        } else {
-            binance_manager
-                .get_vol_source_path("BTCUSDT")
-                .await
-                .unwrap_or_else(|| "UNKNOWN".to_string())
-        };
-
-        // Sanitize f64 values — prevent NaN/Inf from reaching CSV
-        // (NaN formats as "NaN" which breaks pandas numeric parsing)
-        fn sanitize(v: f64) -> f64 {
-            if v.is_finite() { v } else { 0.0 }
-        }
-
-        // Extract Polymarket prices
+        // Extract Polymarket prices (moved up for C6 resolution detection)
         let yes_bid = yes_prices
             .as_ref()
             .and_then(|p| p.best_bid.map(|d| d.to_f64().unwrap_or(0.0)))
@@ -919,6 +978,63 @@ async fn main() -> Result<()> {
 
         let yes_spread = calculate_spread_bps(yes_bid, yes_ask);
         let no_spread = calculate_spread_bps(no_bid, no_ask);
+
+        // C6 FIX: Resolution detection using Polymarket bid prices + Gamma API fallback
+        // Primary: winning side trades at ~$1 near expiry
+        // Fallback: Gamma API outcomePrices for inconclusive cases
+        let outcome = if yes_bid >= 0.99 {
+            "YES".to_string()
+        } else if no_bid >= 0.99 {
+            "NO".to_string()
+        } else if resolved {
+            // Market expired but prices not conclusive — check Gamma API cache
+            let cached = gamma_outcome.lock().unwrap().clone();
+            if let Some(result) = cached {
+                result
+            } else if !gamma_fetch_in_progress.load(Ordering::SeqCst) {
+                // Spawn non-blocking Gamma API fetch
+                gamma_fetch_in_progress.store(true, Ordering::SeqCst);
+                let cache = gamma_outcome.clone();
+                let in_progress = gamma_fetch_in_progress.clone();
+                let slug = current_market.slug.clone();
+                let client = http.clone();
+                tokio::spawn(async move {
+                    match fetch_gamma_outcome(&client, &slug).await {
+                        Ok(result) => {
+                            info!("✅ Gamma API outcome for {}: {}", slug, result);
+                            *cache.lock().unwrap() = Some(result);
+                        }
+                        Err(e) => {
+                            warn!("Gamma outcome fetch failed for {}: {}", slug, e);
+                        }
+                    }
+                    in_progress.store(false, Ordering::SeqCst);
+                });
+                String::new()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        // Determine volatility data source - use actual path from calculator
+        let vol_data_source = if snapshot.volatility_regime == "BOOTSTRAP" {
+            "BOOTSTRAP".to_string()
+        } else {
+            binance_manager
+                .get_vol_source_path("BTCUSDT")
+                .await
+                .unwrap_or_else(|| "UNKNOWN".to_string())
+        };
+
+        // Sanitize f64 values — prevent NaN/Inf from reaching CSV
+        // (NaN formats as "NaN" which breaks pandas numeric parsing)
+        fn sanitize(v: f64) -> f64 {
+            if v.is_finite() { v } else { 0.0 }
+        }
+
+        // (Polymarket price extraction moved above outcome determination for C6)
 
         // Get RTDS snapshot (Polymarket's price feed view)
         let rtds = rtds_tracker.get_snapshot(snapshot.spot_price, binance_update_ms);
@@ -1076,6 +1192,10 @@ async fn main() -> Result<()> {
 
                         current_market = next_market;
                         markets_tracked += 1;
+
+                        // Reset Gamma outcome cache for new market
+                        *gamma_outcome.lock().unwrap() = None;
+                        gamma_fetch_in_progress.store(false, Ordering::SeqCst);
 
                         // Reset failure counter on successful rotation
                         consecutive_fetch_failures = 0;

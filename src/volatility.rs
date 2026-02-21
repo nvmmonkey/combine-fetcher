@@ -96,6 +96,7 @@ pub struct VolumeTick {
 /// - Deduplicates identical prices only (filters orderbook noise)
 /// - Provides fast volatility (5s window, 3+ samples) for trading decisions
 /// - Provides accurate volatility (Fibonacci blend) for Greeks/pricing
+#[derive(Clone)]
 pub struct FibonacciVolatilityCalculator {
     // Real-time tick buffer (from WebSocket bookTicker)
     price_buffer_unified: VecDeque<PriceTick>,
@@ -466,7 +467,12 @@ impl FibonacciVolatilityCalculator {
 
         // Clamp to reasonable range (0.1% to 300% annualized)
         // Lower clamp reduced from 5% to 0.1% to allow real low-vol periods
-        Some(annualized.clamp(0.001, 3.0))
+        // H5 FIX: Prevent NaN propagation to MarketSnapshot
+        let result = annualized.clamp(0.001, 3.0);
+        if !result.is_finite() {
+            return None;
+        }
+        Some(result)
     }
 
     /// Calculate all Fibonacci timeframes with caching
