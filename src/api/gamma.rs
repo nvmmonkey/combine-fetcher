@@ -1,7 +1,8 @@
 //! Gamma API client for Polymarket event data.
 //!
-//! Provides functions to fetch BTC up/down market info and resolution outcomes
-//! from the Gamma API.
+//! Provides functions to fetch market info and resolution outcomes from the
+//! Gamma API. Supports multiple assets (btc, eth, sol, xrp) and timeframes
+//! (5m = 300s, 15m = 900s).
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -10,7 +11,7 @@ use tracing::info;
 
 use crate::constants::{GAMMA_API_URL, HTTP_TIMEOUT_SECS, MARKET_WINDOW_SECONDS};
 
-/// Market information for a BTC up/down 15-minute window.
+/// Market information for an up/down binary market window.
 #[derive(Debug, Clone)]
 pub struct MarketInfo {
     pub unique_id: String,
@@ -22,17 +23,33 @@ pub struct MarketInfo {
     pub window_end: i64,
     pub strike_price: Option<f64>,
     pub strike_fetched: bool,
+    pub asset: String,
+    pub window_seconds: i64,
 }
 
-/// Fetch market data from the Gamma API for a given window start timestamp.
+/// Convert window_seconds to a timeframe label used in slugs.
+fn timeframe_str(window_seconds: i64) -> &'static str {
+    if window_seconds == 300 {
+        "5m"
+    } else {
+        "15m"
+    }
+}
+
+/// Fetch market data from the Gamma API for a specific asset, timeframe, and window.
 ///
-/// This is the shared implementation used by both `fetch_current_market` and
-/// `fetch_next_market`. It constructs the slug from `window_start`, calls the
+/// Builds a slug like `{asset}-updown-{timeframe}-{window_start}`, calls the
 /// Gamma API, and parses the Up/Down token IDs from the response.
-async fn fetch_market(client: &reqwest::Client, window_start: i64) -> Result<MarketInfo> {
-    let window_end = window_start + MARKET_WINDOW_SECONDS;
-    let unique_id = format!("btc-updown-15m-{}", window_start);
-    let slug = format!("btc-updown-15m-{}", window_start);
+pub async fn fetch_market_for(
+    client: &reqwest::Client,
+    asset: &str,
+    window_seconds: i64,
+    window_start: i64,
+) -> Result<MarketInfo> {
+    let tf = timeframe_str(window_seconds);
+    let window_end = window_start + window_seconds;
+    let unique_id = format!("{}-updown-{}-{}", asset, tf, window_start);
+    let slug = unique_id.clone();
     let url = format!("{}/events/slug/{}", GAMMA_API_URL, slug);
 
     info!("Fetching market: {}", unique_id);
@@ -76,37 +93,59 @@ async fn fetch_market(client: &reqwest::Client, window_start: i64) -> Result<Mar
                 window_end,
                 strike_price: None,
                 strike_fetched: false,
+                asset: asset.to_string(),
+                window_seconds,
             });
         }
     }
     Err(anyhow!(
-        "No valid BTC market for window {}",
+        "No valid {} market for window {}",
+        asset.to_uppercase(),
         window_start
     ))
 }
 
-/// Fetch the current market based on the current UTC time.
+/// Fetch the current market for a given asset and timeframe.
 ///
 /// Window calculation: if we're within the first 60 seconds of a window,
 /// use the previous window (to avoid fetching a market that doesn't exist yet).
-pub async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
+pub async fn fetch_current_market_for(
+    client: &reqwest::Client,
+    asset: &str,
+    window_seconds: i64,
+) -> Result<MarketInfo> {
     let now = Utc::now().timestamp();
-    let pos = now % MARKET_WINDOW_SECONDS;
+    let pos = now % window_seconds;
     let window_start = if pos < 60 {
-        ((now / MARKET_WINDOW_SECONDS) - 1) * MARKET_WINDOW_SECONDS
+        ((now / window_seconds) - 1) * window_seconds
     } else {
-        (now / MARKET_WINDOW_SECONDS) * MARKET_WINDOW_SECONDS
+        (now / window_seconds) * window_seconds
     };
-    fetch_market(client, window_start).await
+    fetch_market_for(client, asset, window_seconds, window_start).await
 }
 
-/// Fetch the next market after the given window start timestamp.
+/// Fetch the next market after the given window start for a given asset and timeframe.
+pub async fn fetch_next_market_for(
+    client: &reqwest::Client,
+    asset: &str,
+    window_seconds: i64,
+    current_window_start: i64,
+) -> Result<MarketInfo> {
+    let next_window_start = current_window_start + window_seconds;
+    fetch_market_for(client, asset, window_seconds, next_window_start).await
+}
+
+/// Fetch the current BTC 15m market (backward-compatible wrapper).
+pub async fn fetch_current_market(client: &reqwest::Client) -> Result<MarketInfo> {
+    fetch_current_market_for(client, "btc", MARKET_WINDOW_SECONDS).await
+}
+
+/// Fetch the next BTC 15m market (backward-compatible wrapper).
 pub async fn fetch_next_market(
     client: &reqwest::Client,
     current_window_start: i64,
 ) -> Result<MarketInfo> {
-    let next_window_start = current_window_start + MARKET_WINDOW_SECONDS;
-    fetch_market(client, next_window_start).await
+    fetch_next_market_for(client, "btc", MARKET_WINDOW_SECONDS, current_window_start).await
 }
 
 /// Fetch market outcome from the Gamma API for resolution detection.

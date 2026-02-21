@@ -20,6 +20,10 @@ path = "src/bin/multi_market_logger.rs"
 name = "dashboard"
 path = "src/bin/dashboard.rs"
 
+[[bin]]
+name = "multi_asset_logger"
+path = "src/bin/multi_asset_logger.rs"
+
 # [[bin]]
 # name = "test_binance_bootstrap"
 # path = "src/bin/test_binance_bootstrap.rs"

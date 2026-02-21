@@ -954,6 +954,8 @@ async fn main() -> Result<()> {
                             window_end: next_ws + combine_fetcher::MARKET_WINDOW_SECONDS,
                             strike_price: None,
                             strike_fetched: false,
+                            asset: "btc".to_string(),
+                            window_seconds: combine_fetcher::MARKET_WINDOW_SECONDS,
                         })
                     }
                     _ => {

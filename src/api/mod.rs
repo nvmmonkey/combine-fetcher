@@ -11,7 +11,10 @@ pub mod rtds_tracker;
 pub mod strike;
 
 pub use binance::{BinanceDataManager, BinancePrice};
-pub use gamma::{MarketInfo, fetch_current_market, fetch_next_market, fetch_outcome};
+pub use gamma::{
+    MarketInfo, fetch_current_market, fetch_next_market, fetch_outcome,
+    fetch_market_for, fetch_current_market_for, fetch_next_market_for,
+};
 pub use market_events::{MarketEventStream, NewMarketEvent, MarketResolvedEvent};
 pub use polymarket::{PolymarketOrderbookStream, PolyPriceUpdate, TokenPrices};
 pub use rtds_tracker::{RtdsTracker, RtdsSnapshot};

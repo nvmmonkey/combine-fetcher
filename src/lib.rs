@@ -8,7 +8,10 @@ pub mod constants;
 
 pub use api::{BinanceDataManager, BinancePrice, PolymarketOrderbookStream};
 pub use api::{MarketEventStream, NewMarketEvent, MarketResolvedEvent};
-pub use api::{MarketInfo, fetch_current_market, fetch_next_market, fetch_outcome};
+pub use api::{
+    MarketInfo, fetch_current_market, fetch_next_market, fetch_outcome,
+    fetch_market_for, fetch_current_market_for, fetch_next_market_for,
+};
 pub use api::{RetryConfig, fetch_strike, fetch_strike_with_retry};
 pub use constants::*;
 

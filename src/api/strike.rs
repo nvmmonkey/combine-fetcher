@@ -37,17 +37,38 @@ struct PolymarketStrikeResponse {
     open_price: Option<f64>,
 }
 
+/// Map window_seconds to the Polymarket variant query parameter.
+fn variant_for_window(window_seconds: i64) -> &'static str {
+    if window_seconds == 300 {
+        "five"
+    } else {
+        "fifteen"
+    }
+}
+
 /// Build the Polymarket crypto-price API URL for a given market's time window.
+///
+/// Derives `symbol` from `market.asset` (uppercased, defaults to "BTC" if empty)
+/// and `variant` from `market.window_seconds` (300 -> "five", else "fifteen").
 fn build_strike_url(market: &MarketInfo) -> Result<String> {
+    let symbol = if market.asset.is_empty() {
+        "BTC".to_string()
+    } else {
+        market.asset.to_uppercase()
+    };
+    let variant = variant_for_window(market.window_seconds);
+
     let start =
         DateTime::from_timestamp(market.window_start, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
     let end =
         DateTime::from_timestamp(market.window_end, 0).ok_or_else(|| anyhow!("Bad timestamp"))?;
 
     Ok(format!(
-        "{}/crypto-price?symbol=BTC&eventStartTime={}&variant=fifteen&endDate={}",
+        "{}/crypto-price?symbol={}&eventStartTime={}&variant={}&endDate={}",
         POLY_CRYPTO_API_URL,
+        symbol,
         start.format("%Y-%m-%dT%H:%M:%SZ"),
+        variant,
         end.format("%Y-%m-%dT%H:%M:%SZ")
     ))
 }
