@@ -1064,6 +1064,16 @@ async fn main() -> Result<()> {
                 match fetch_next_market_after(&http, current_market.window_start).await {
                     Ok(next_market) => {
                         info!("✅ Rotated to: {}", next_market.unique_id);
+
+                        // Clean up old token entries before subscribing to new ones
+                        // This prevents stale entries from accumulating in the DashMap
+                        // and triggering perpetual health warnings
+                        let old_token_ids = vec![
+                            current_market.yes_token_id.clone(),
+                            current_market.no_token_id.clone(),
+                        ];
+                        poly_stream.remove_tokens(&old_token_ids);
+
                         current_market = next_market;
                         markets_tracked += 1;
 

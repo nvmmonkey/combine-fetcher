@@ -324,29 +324,36 @@ impl PolymarketOrderbookStream {
         }
     }
 
-    /// Get overall connection health (percent of tokens that are connected and healthy)
+    /// Get overall connection health (percent of active tokens that are connected and healthy)
     ///
     /// Returns a health score from 0-100% based on:
     /// - WebSocket stream is active
     /// - No excessive stream errors
     /// - Has received at least some data
+    ///
+    /// Only considers currently tracked tokens (ignores stale entries from old markets).
     pub fn connection_health(&self) -> f64 {
-        if self.prices.is_empty() {
+        let active_ids = self.token_ids.lock().ok().map(|ids| ids.clone());
+        let active_entries: Vec<_> = self
+            .prices
+            .iter()
+            .filter(|entry| match &active_ids {
+                Some(ids) => ids.contains(entry.key()),
+                None => true,
+            })
+            .collect();
+
+        if active_entries.is_empty() {
             return 0.0;
         }
-        let healthy_count = self
-            .prices
+        let healthy_count = active_entries
             .iter()
             .filter(|p| {
                 let prices = p.value();
-                // Consider healthy if:
-                // 1. WebSocket is connected
-                // 2. Has received some data (ever)
-                // 3. No excessive errors
                 prices.ws_connected && prices.last_update_ms > 0 && !prices.is_unhealthy()
             })
             .count();
-        (healthy_count as f64 / self.prices.len() as f64) * 100.0
+        (healthy_count as f64 / active_entries.len() as f64) * 100.0
     }
 
     /// Get the total number of price stream reconnections
@@ -413,15 +420,21 @@ impl PolymarketOrderbookStream {
             "never".to_string()
         };
 
-        // Count tokens by data source
-        let (ws_count, api_count) = self.prices.iter().fold((0, 0), |(ws, api), entry| {
-            let prices = entry.value();
-            if prices.data_source() == "WS" {
-                (ws + 1, api)
-            } else {
-                (ws, api + 1)
-            }
-        });
+        // Count tokens by data source (only active tokens)
+        let active_ids = self.token_ids.lock().ok().map(|ids| ids.clone());
+        let (ws_count, api_count) = self.prices.iter()
+            .filter(|entry| match &active_ids {
+                Some(ids) => ids.contains(entry.key()),
+                None => true,
+            })
+            .fold((0, 0), |(ws, api), entry| {
+                let prices = entry.value();
+                if prices.data_source() == "WS" {
+                    (ws + 1, api)
+                } else {
+                    (ws, api + 1)
+                }
+            });
 
         format!(
             "Health: {:.1}% | WS:{} API:{} | Price reco: {} ({}) | Book reco: {} ({}) | Very stale: {} | WS msgs: {} | API calls: {}",
@@ -438,10 +451,18 @@ impl PolymarketOrderbookStream {
         )
     }
 
-    /// Get detailed status for each token
+    /// Get detailed status for each token (only currently tracked tokens)
     pub fn detailed_status(&self) -> Vec<(String, String)> {
+        let active_ids = self.token_ids.lock().ok().map(|ids| ids.clone());
         self.prices
             .iter()
+            .filter(|entry| {
+                // Only report on actively tracked tokens
+                match &active_ids {
+                    Some(ids) => ids.contains(entry.key()),
+                    None => true, // If lock fails, show all
+                }
+            })
             .map(|entry| {
                 let token_id = entry.key().clone();
                 let short_id = if token_id.len() > 8 {
@@ -453,6 +474,18 @@ impl PolymarketOrderbookStream {
                 (short_id.to_string(), detail)
             })
             .collect()
+    }
+
+    /// Remove old token entries from the price cache.
+    ///
+    /// Call this before subscribing to new tokens on market rotation to prevent
+    /// stale entries from accumulating and triggering health warnings.
+    pub fn remove_tokens(&self, token_ids: &[String]) {
+        for token_id in token_ids {
+            if self.prices.remove(token_id).is_some() {
+                info!("[CLEANUP] Removed stale token: {}...", &token_id[..token_id.len().min(8)]);
+            }
+        }
     }
 
     /// Start streaming orderbook updates for the given token IDs
@@ -910,7 +943,6 @@ impl PolymarketOrderbookStream {
         });
 
         // Spawn health monitoring task
-        let prices_health = Arc::clone(&self.prices);
         let very_stale_counter = Arc::clone(&self.very_stale_count);
         let stream_clone = Arc::clone(&self);
 
@@ -953,10 +985,11 @@ impl PolymarketOrderbookStream {
 
                 very_stale_counter.store(stale_ws as u32, Ordering::Relaxed);
 
-                // Log summary every 30s (3 ticks), or immediately if there are issues
+                // Log summary every 30s (3 ticks) — same cadence for healthy and unhealthy
+                // This prevents warning spam when stale tokens accumulate
                 let has_issues = disconnected > 0 || unhealthy > 0 || stale_ws > 0;
 
-                if tick_count % 3 == 0 || has_issues {
+                if tick_count % 3 == 0 {
                     if has_issues {
                         warn!(
                             "[HEALTH] 🔍 ACTIVE_WS:{} QUIET_WS:{} STALE:{} DISC:{} UNHEALTHY:{} | {}",
