@@ -1018,14 +1018,11 @@ async fn main() -> Result<()> {
             String::new()
         };
 
-        // Determine volatility data source - use actual path from calculator
+        // Determine volatility data source - read from snapshot (computed on the clone)
         let vol_data_source = if snapshot.volatility_regime == "BOOTSTRAP" {
             "BOOTSTRAP".to_string()
         } else {
-            binance_manager
-                .get_vol_source_path("BTCUSDT")
-                .await
-                .unwrap_or_else(|| "UNKNOWN".to_string())
+            snapshot.vol_source_path.clone()
         };
 
         // Sanitize f64 values — prevent NaN/Inf from reaching CSV

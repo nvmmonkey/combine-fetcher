@@ -704,12 +704,15 @@ impl BinanceDataManager {
         // Clone-compute pattern: clone under a brief read lock, then compute on the clone.
         // This prevents lock contention between WS ingestion (add_price) and snapshot reads.
         let vol_calculator = self.vol_calculators.get(&upper_symbol)?;
-        let (vol_1sec, vol_5sec, vol_13sec, vol_34sec, vol_89sec, realized_vol) = {
+        let (vol_1sec, vol_5sec, vol_13sec, vol_34sec, vol_89sec, realized_vol, vol_source_path, volatility_regime) = {
             let mut vol_calc_clone = {
                 let guard = vol_calculator.read().await;
                 (*guard).clone()
             };
-            vol_calc_clone.calculate_all(current_time)
+            let result = vol_calc_clone.calculate_all(current_time);
+            let source_path = vol_calc_clone.get_vol_source_path().to_string();
+            let regime = vol_calc_clone.get_volatility_regime();
+            (result.0, result.1, result.2, result.3, result.4, result.5, source_path, regime)
         };
 
         // Get volume tracker for this symbol (prices lock already released)
@@ -732,17 +735,6 @@ impl BinanceDataManager {
             0.0
         };
 
-        // Determine volatility regime
-        let volatility_regime = if vol_1sec / vol_89sec.max(0.01) > 2.0 {
-            "EXTREME".to_string()
-        } else if vol_1sec / vol_89sec.max(0.01) > 1.5 {
-            "HIGH".to_string()
-        } else if vol_1sec / vol_89sec.max(0.01) < 0.7 {
-            "LOW".to_string()
-        } else {
-            "NORMAL".to_string()
-        };
-
         Some(MarketSnapshot {
             timestamp: current_time,
             symbol: upper_symbol,
@@ -760,6 +752,7 @@ impl BinanceDataManager {
             signal_quality: if realized_vol > 0.5 { "GOOD" } else { "LOW" }.to_string(),
             trade_confidence: if realized_vol > 0.5 { 0.8 } else { 0.5 },
             volatility_regime,
+            vol_source_path,
         })
     }
 

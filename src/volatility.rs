@@ -49,6 +49,10 @@ pub struct MarketSnapshot {
     pub signal_quality: String,
     pub trade_confidence: f64,
     pub volatility_regime: String,
+
+    // Volatility source path (computed during calculate_all)
+    // "REALTIME_FIBONACCI" | "1MIN_FALLBACK" | "DEFAULT"
+    pub vol_source_path: String,
 }
 
 // ============================================================================
