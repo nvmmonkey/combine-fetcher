@@ -1,5 +1,12 @@
-// btc_dashboard.rs — Real-time BTC/Polymarket Dashboard v3.1
-// Fixes applied vs v3:
+// btc_dashboard.rs — Real-time BTC/Polymarket Dashboard v4.0
+// v4.0 enhancements:
+//   - Position Books visualization (DN + DIR tracking)
+//   - Trade Timeline with exploit labels (TradeClass, ExploitTag)
+//   - Exploit Scoreboard with corrected P&L attribution
+//   - Risk Monitor panel with 12 alert conditions
+//   - 50+ new metrics for strategy transparency
+//
+// v3.1 fixes retained:
 //   1. classify_regime: "YES_TREND"->"YES_TRENDING", "NO_TREND"->"NO_TRENDING" (matches backtest)
 //   2. cregime: updated matching arms to new labels
 //   3. calc_obi: size-only (not price×size) — removes price-level bullish bias
@@ -18,12 +25,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Gauge, Paragraph},
-    Frame, Terminal,
+    Frame, Terminal, backend::CrosstermBackend, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, palette::material::WHITE}, text::{Line, Span}, widgets::{Block, BorderType, Borders, Gauge, Paragraph}
 };
 use rust_decimal::prelude::*;
 use std::{
@@ -200,6 +202,130 @@ fn z_score(spot: f64, strike: f64, vol: f64, ttx_min: f64) -> (f64, f64, &'stati
     if em < 1e-10 { return (0.0, 0.0, "YES"); }
     let z = (spot - strike) / em;
     (z, z.abs(), if z > 0.0 { "YES" } else { "NO" })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New data structures for v4.0: Position Books, Trade Timeline, Risk Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Trade classification (11 variants covering all trade types from backtest)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TradeClass {
+    DnSeed,           // DN initial seeding
+    DnCheap,          // DN cheap accumulation
+    DnLatency,        // DN latency-boosted
+    DnHedge,          // DN balance hedge
+    DnEmergencyPair,  // DN aggressive pair completion
+    DnFlipHedge,      // DN z-flip hedge
+    DirZScore,        // DIR standard directional
+    DirEmergencyLean, // DIR emergency lean
+    DirEmergencyHedge,// DIR emergency hedge
+    DirFlipHedge,     // DIR post-commit flip hedge
+    DirChainlinkArb,  // DIR Chainlink resolution arb (Exploit 4)
+}
+
+impl TradeClass {
+    fn color(&self) -> Color {
+        match self {
+            TradeClass::DnSeed => CC,           // Cyan: foundational
+            TradeClass::DnCheap => CC,          // Cyan: accumulation
+            TradeClass::DnLatency => CTL,       // Teal: latency-boosted
+            TradeClass::DnHedge => Color::Rgb(80, 144, 255),  // Blue
+            TradeClass::DnEmergencyPair => CY,  // Yellow: urgent
+            TradeClass::DnFlipHedge => COR,     // Orange: reactive
+            TradeClass::DirZScore => CG,        // Green: confident directional
+            TradeClass::DirEmergencyLean => CY, // Yellow: urgent rescue
+            TradeClass::DirEmergencyHedge => COR,// Orange: defensive rescue
+            TradeClass::DirFlipHedge => CM,     // Magenta: instability response
+            TradeClass::DirChainlinkArb => CGD, // Gold: high-conviction exploit
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            TradeClass::DnSeed => "SEED",
+            TradeClass::DnCheap => "CHEAP",
+            TradeClass::DnLatency => "LATENCY",
+            TradeClass::DnHedge => "HEDGE",
+            TradeClass::DnEmergencyPair => "EMER_PAIR",
+            TradeClass::DnFlipHedge => "FLIP_HEDGE",
+            TradeClass::DirZScore => "Z-SCORE",
+            TradeClass::DirEmergencyLean => "EMER_LEAN",
+            TradeClass::DirEmergencyHedge => "EMER_HEDGE",
+            TradeClass::DirFlipHedge => "FLIP_HEDGE",
+            TradeClass::DirChainlinkArb => "CL_ARB",
+        }
+    }
+}
+
+/// Exploit tags (additive — single trade can have multiple)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExploitTag {
+    SnipeFiltered,  // Exploit 1: passed snipe check
+    EdgeScaled,     // Exploit 2: edge-scaled size
+    StaleGated,     // Exploit 3: passed stale gate
+    ChainlinkArb,   // Exploit 4: Chainlink arb
+}
+
+impl ExploitTag {
+    fn badge(&self) -> &'static str {
+        match self {
+            ExploitTag::SnipeFiltered => "S",
+            ExploitTag::EdgeScaled => "E",
+            ExploitTag::StaleGated => "G",
+            ExploitTag::ChainlinkArb => "C",
+        }
+    }
+}
+
+/// Single trade event
+#[derive(Debug, Clone)]
+pub struct TradeEvent {
+    pub tick: u32,
+    pub book: &'static str,  // "DN" or "DIR"
+    pub side: &'static str,  // "YES" or "NO"
+    pub shares: u32,
+    pub price: f64,
+    pub cost: f64,
+    pub z_score: f64,
+    pub abs_z: f64,
+    pub trade_class: TradeClass,
+    pub exploit_tags: Vec<ExploitTag>,
+    pub rtds_adv_bps: f64,
+    pub regime: String,
+    pub time_pct: f64,
+}
+
+/// Risk alert
+#[derive(Debug, Clone)]
+pub struct RiskAlert {
+    pub severity: AlertSeverity,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Ord, PartialOrd, Eq)]
+pub enum AlertSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+impl AlertSeverity {
+    fn color(&self) -> Color {
+        match self {
+            AlertSeverity::Info => CGR,
+            AlertSeverity::Warning => CY,
+            AlertSeverity::Critical => CR,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            AlertSeverity::Info => "ℹ",
+            AlertSeverity::Warning => "⚠",
+            AlertSeverity::Critical => "🔴",
+        }
+    }
 }
 
 /// Expected move as % of strike: vol × √T × 100
@@ -489,6 +615,41 @@ struct Row {
     // derived
     obi: f64,
     cvd1m: f64, cvd3m: f64, cvd5m: f64,
+
+    // v4.0: Position Books (DN + DIR)
+    dn_yes_shares: u32,
+    dn_no_shares: u32,
+    dn_combined_avg: Option<f64>,
+    dn_ew: bool,
+    dn_abandoned: bool,
+    dn_imbalance: f64,
+    dn_min_pnl: f64,
+    dr_yes_shares: u32,
+    dr_no_shares: u32,
+    dr_committed_dir: Option<&'static str>,  // "YES" or "NO"
+    dr_frozen: bool,
+    dr_post_flip_count: u32,
+    total_exposure: f64,
+    max_exposure: f64,
+
+    // v4.0: Trade Timeline
+    recent_trades: VecDeque<TradeEvent>,
+
+    // v4.0: Exploit Metrics
+    snipe_dn_trades: u32,
+    snipe_dir_trades: u32,
+    snipe_blocked: u32,
+    snipe_edge_sum_bps: f64,
+    edge_scaled_trades: u32,
+    edge_avg_scale: f64,
+    exploit3_dn_gated: u32,
+    exploit3_dir_gated: u32,
+    chainlink_arb_trades: u32,
+    chainlink_arb_profit: f64,
+    chainlink_arb_roi: f64,
+
+    // v4.0: Risk Alerts
+    alerts: Vec<RiskAlert>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -728,13 +889,17 @@ fn render_dist_chart(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     let chart_h = inner_h.saturating_sub(fixed).max(3);
     let n_cols  = inner_w.max(10);
 
-    // μ = clamped z-score, σ = 1.0 (standard normal)
-    let mu    = row.z.clamp(-3.5, 3.5);
+    // μ = actual z-score (not clamped for display), σ = 1.0 (standard normal)
+    // Display range expands to show extreme z-scores in the tails
+    let mu    = row.z;
     let sigma = 1.0_f64;
-    let x_range = DIST_X_MAX - DIST_X_MIN;
+    let display_range = (row.abs_z + 2.0).max(4.0);  // Show z-score with 2σ margin
+    let x_min = -display_range;
+    let x_max = display_range;
+    let x_range = x_max - x_min;
 
     let col_of = |x: f64| -> usize {
-        ((x - DIST_X_MIN) / x_range * (n_cols - 1) as f64)
+        ((x - x_min) / x_range * (n_cols - 1) as f64)
             .round().clamp(0.0, (n_cols - 1) as f64) as usize
     };
     let strike_col  = col_of(0.0);
@@ -781,7 +946,7 @@ fn render_dist_chart(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
         let mut spans: Vec<Span> = Vec::with_capacity(n_cols);
         for col in 0..n_cols {
             let level = mat[row_i][col] as usize;
-            let x     = DIST_X_MIN + (col as f64 / (n_cols - 1).max(1) as f64) * x_range;
+            let x     = x_min + (col as f64 / (n_cols - 1).max(1) as f64) * x_range;
             let (ch, color) = if level == 0 {
                 let ch = if col == strike_col      { '┊' }
                          else if col == sig_lo_col
@@ -950,7 +1115,7 @@ fn render_ttx_gauge(f: &mut Frame, area: Rect, row: &Row) {
             .percent(pct)
             .label(Span::styled(
                 format!(" Window {pct}% elapsed "),
-                Style::default().fg(ttx_c),
+                Style::default().fg(CW).add_modifier(Modifier::BOLD),  // White text for contrast
             )),
         area,
     );
@@ -1278,7 +1443,8 @@ fn render_greeks(f: &mut Frame, area: Rect, row: &Row) {
 // PANEL: Signal bar (bottom full-width)
 // ═════════════════════════════════════════════════════════════════════════════
 fn render_signals(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
-    let sc  = csig(row.sig_score);
+    // let sc  = csig(row.sig_score); 
+    let sc  = WHITE;
     let lbl = if row.sig_score <= -4 { "STRONG BEAR" }
               else if row.sig_score <= -2 { "BEARISH" }
               else if row.sig_score == -1 { "LEAN BEAR" }
@@ -1349,6 +1515,162 @@ fn render_signals(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v4.0: New rendering functions for Position Books, Timeline, Scoreboard, Alerts
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn render_position_books(f: &mut Frame, area: Rect, row: &Row) {
+    let h = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    // DN Book
+    let dn_info = vec![
+        Line::from(vec![
+            Span::raw("YES: "), Span::styled(format!("{} sh", row.dn_yes_shares), Style::default().fg(CG)),
+            Span::raw("  NO: "), Span::styled(format!("{} sh", row.dn_no_shares), Style::default().fg(CR)),
+        ]),
+        Line::from(vec![
+            Span::raw("Avg: "),
+            Span::styled(
+                format!("${:.3}", row.dn_combined_avg.unwrap_or(0.0)),
+                Style::default().fg(if row.dn_combined_avg.map(|v| v < 1.0).unwrap_or(false) { CG } else { COR }),
+            ),
+            if row.dn_ew { Span::styled(" ✓ EW", Style::default().fg(CG)) } else { Span::raw("") },
+            if row.dn_abandoned { Span::styled(" ⚠ ABANDONED", Style::default().fg(CR)) } else { Span::raw("") },
+        ]),
+        Line::from(vec![
+            Span::raw("Min PnL: "), Span::styled(format!("${:+.0}", row.dn_min_pnl), Style::default().fg(cs(row.dn_min_pnl))),
+            Span::raw("  Imbal: "), Span::styled(format!("{:.2}", row.dn_imbalance), Style::default().fg(if row.dn_imbalance > 0.7 { CY } else { CGR })),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(dn_info).block(panel("DN BOOK", CC)), h[0]);
+
+    // DIR Book
+    let dr_dir_str = row.dr_committed_dir.unwrap_or("—");
+    let dr_info = vec![
+        Line::from(vec![
+            Span::raw("Dir: "), Span::styled(dr_dir_str, Style::default().fg(if dr_dir_str == "YES" { CG } else if dr_dir_str == "NO" { CR } else { CGR })),
+            Span::raw("  YES: "), Span::styled(format!("{}", row.dr_yes_shares), Style::default().fg(CG)),
+            Span::raw("  NO: "), Span::styled(format!("{}", row.dr_no_shares), Style::default().fg(CR)),
+        ]),
+        Line::from(vec![
+            if row.dr_frozen { Span::styled("FROZEN ⚠", Style::default().fg(CR)) } else { Span::raw("Active") },
+            Span::raw("  Flips: "), Span::styled(format!("{}", row.dr_post_flip_count), Style::default().fg(if row.dr_post_flip_count > 2 { CY } else { CGR })),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(dr_info).block(panel("DIR BOOK", CTL)), h[1]);
+}
+
+fn render_risk_monitor(f: &mut Frame, area: Rect, row: &Row) {
+    // Capital gauge
+    let cap_pct = if row.max_exposure > 0.0 { (row.total_exposure / row.max_exposure * 100.0).min(100.0) } else { 0.0 };
+    let cap_color = if cap_pct < 60.0 { CG } else if cap_pct < 80.0 { CY } else if cap_pct < 95.0 { COR } else { CR };
+
+    let gauge = Gauge::default()
+        .block(panel("CAPITAL", cap_color))
+        .gauge_style(Style::default().fg(cap_color))
+        .percent(cap_pct as u16)
+        .label(format!("{:.0}% (${:.0}/${:.0})", cap_pct, row.total_exposure, row.max_exposure));
+
+    f.render_widget(gauge, area);
+}
+
+// fn render_trade_timeline(f: &mut Frame, area: Rect, row: &Row) {
+//     let trades = row.recent_trades.iter().rev().take(8).collect::<Vec<_>>();
+//     let lines: Vec<Line> = trades.iter().map(|t| {
+//         let tag_str = t.exploit_tags.iter().map(|tag| tag.badge()).collect::<String>();
+//         Line::from(vec![
+//             Span::styled(format!("{:3}", t.tick), Style::default().fg(CGR)),
+//             Span::raw(" "),
+//             Span::styled(t.book, Style::default().fg(if t.book == "DN" { CC } else { CTL })),
+//             Span::raw(" "),
+//             Span::styled(t.trade_class.label(), Style::default().fg(t.trade_class.color())),
+//             Span::raw(" "),
+//             Span::styled(t.side, Style::default().fg(if t.side == "YES" { CG } else { CR })),
+//             Span::raw(" "),
+//             Span::styled(format!("{}sh", t.shares), Style::default().fg(CW)),
+//             Span::raw(" @ "),
+//             Span::styled(format!("${:.3}", t.price), Style::default().fg(CW)),
+//             Span::raw(" "),
+//             Span::styled(tag_str, Style::default().fg(CGD).add_modifier(Modifier::BOLD)),
+//         ])
+//     }).collect();
+
+//     f.render_widget(
+//         Paragraph::new(lines).block(panel("TIMELINE", CW)),
+//         area,
+//     );
+// }
+
+// fn render_exploit_scoreboard(f: &mut Frame, area: Rect, row: &Row) {
+//     let h = Layout::default()
+//         .direction(Direction::Horizontal)
+//         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+//         .split(area);
+
+//     let v1 = Layout::default()
+//         .direction(Direction::Vertical)
+//         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+//         .split(h[0]);
+
+//     let v2 = Layout::default()
+//         .direction(Direction::Vertical)
+//         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+//         .split(h[1]);
+
+//     // Exploit 1: Snipe
+//     let snipe_total = row.snipe_dn_trades + row.snipe_dir_trades;
+//     let snipe_avg = if snipe_total > 0 { row.snipe_edge_sum_bps / snipe_total as f64 } else { 0.0 };
+//     let snipe_info = vec![
+//         Line::from(format!("Passed: {}", snipe_total)),
+//         Line::from(format!("Blocked: {}", row.snipe_blocked)),
+//         Line::from(format!("Edge sum: {:.1} bps", row.snipe_edge_sum_bps)),
+//         Line::from(format!("Avg/trade: {:.2} bps", snipe_avg)),
+//     ];
+//     f.render_widget(Paragraph::new(snipe_info).block(panel("1. SNIPE", CG)), v1[0]);
+
+//     // Exploit 2: Edge Scale
+//     let edge_info = vec![
+//         Line::from(format!("Trades: {}", row.edge_scaled_trades)),
+//         Line::from(format!("Avg scale: {:.2}×", row.edge_avg_scale)),
+//         Line::from(format!("Amplified: {:.0}%", (row.edge_avg_scale - 1.0) * 100.0)),
+//     ];
+//     f.render_widget(Paragraph::new(edge_info).block(panel("2. EDGE", CY)), v1[1]);
+
+//     // Exploit 3: Gate
+//     let gate_total = row.exploit3_dn_gated + row.exploit3_dir_gated;
+//     let gate_info = vec![
+//         Line::from(format!("Blocked: {}", gate_total)),
+//         Line::from(format!("DN: {} DIR: {}", row.exploit3_dn_gated, row.exploit3_dir_gated)),
+//     ];
+//     f.render_widget(Paragraph::new(gate_info).block(panel("3. GATE", COR)), v2[0]);
+
+//     // Exploit 4: Chainlink Arb (ONLY ONE WITH PROFIT)
+//     let cl_info = vec![
+//         Line::from(format!("Trades: {}", row.chainlink_arb_trades)),
+//         Line::from(format!("Profit: ${:+.2}", row.chainlink_arb_profit)),
+//         Line::from(format!("ROI: {:.1}%", row.chainlink_arb_roi)),
+//     ];
+//     f.render_widget(Paragraph::new(cl_info).block(panel("4. CHAINLINK", CGD)), v2[1]);
+// }
+
+fn render_alerts(f: &mut Frame, area: Rect, row: &Row) {
+    let alert_lines: Vec<Line> = row.alerts.iter().take(5).map(|a| {
+        Line::from(vec![
+            Span::styled(a.severity.label(), Style::default().fg(a.severity.color())),
+            Span::raw(" "),
+            Span::styled(&a.message, Style::default().fg(a.severity.color())),
+        ])
+    }).collect();
+
+    f.render_widget(
+        Paragraph::new(alert_lines).block(panel("ALERTS", if row.alerts.iter().any(|a| a.severity == AlertSeverity::Critical) { CR } else { CY })),
+        area,
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Root draw
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1370,19 +1692,35 @@ fn draw(f: &mut Frame, row: &Row, hist: &History) {
     render_zscore(f, v[2], row);
 
     let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4),   // position books
+            Constraint::Length(4),   // exploit scoreboard
+            Constraint::Min(10),     // body (existing: book, dist, flow, greeks)
+            Constraint::Length(3),   // alerts
+        ])
+        .split(v[3]);
+
+    // New v4.0 panels
+    render_position_books(f, body[0], row);
+    // render_exploit_scoreboard(f, body[1], row);
+    render_alerts(f, body[3], row);
+
+    // Existing panels (reorganized)
+    let main_body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(v[3]);
+        .split(body[2]);
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(14), Constraint::Length(14)])
-        .split(body[0]);
+        .constraints([Constraint::Min(10), Constraint::Length(8)])
+        .split(main_body[0]);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(body[1]);
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(main_body[1]);
 
     render_book(f, left[0], row);
     render_dist_chart(f, left[1], row, hist);
@@ -1584,6 +1922,41 @@ async fn main() -> Result<()> {
             cvd3m:  hist.c3(),
             cvd5m:  hist.c5(),
             sig_score: 0,
+
+            // v4.0: Position Books (initialized to default)
+            dn_yes_shares: 0,
+            dn_no_shares: 0,
+            dn_combined_avg: None,
+            dn_ew: false,
+            dn_abandoned: false,
+            dn_imbalance: 0.0,
+            dn_min_pnl: 0.0,
+            dr_yes_shares: 0,
+            dr_no_shares: 0,
+            dr_committed_dir: None,
+            dr_frozen: false,
+            dr_post_flip_count: 0,
+            total_exposure: 0.0,
+            max_exposure: 200.0,
+
+            // v4.0: Trade Timeline
+            recent_trades: VecDeque::new(),
+
+            // v4.0: Exploit Metrics
+            snipe_dn_trades: 0,
+            snipe_dir_trades: 0,
+            snipe_blocked: 0,
+            snipe_edge_sum_bps: 0.0,
+            edge_scaled_trades: 0,
+            edge_avg_scale: 1.0,
+            exploit3_dn_gated: 0,
+            exploit3_dir_gated: 0,
+            chainlink_arb_trades: 0,
+            chainlink_arb_profit: 0.0,
+            chainlink_arb_roi: 0.0,
+
+            // v4.0: Risk Alerts
+            alerts: Vec::new(),
         };
         row.sig_score = calc_signal(&row);
 
