@@ -167,9 +167,20 @@ def write_per_slug(df: pd.DataFrame, output_dir: str, outcome_cache: dict) -> li
                 wrong_val = wrong.iloc[0]
                 print(f"    [FIX] found wrong outcome {wrong_val}, api correct to {api_outcome}  (slug: {slug}, {len(wrong)} rows)")
 
-        # Append synthetic resolution row: copy of last row with resolved=True + outcome
+        # Remove ALL existing resolution rows and replace with exactly ONE correct row.
+        # The logger can write 1+ resolved rows (some with wrong outcome),
+        # so we strip them all and add back one with the API-confirmed outcome.
         if api_outcome:
-            resolution_row = group.iloc[[-1]].copy()
+            existing_resolved = group[group[COL_RESOLVED] == True]
+            if len(existing_resolved) > 0:
+                # Use last resolved row as template (preserves all other column values)
+                template_row = existing_resolved.iloc[[-1]].copy()
+                group = group[group[COL_RESOLVED] != True].copy()
+                group.reset_index(drop=True, inplace=True)
+            else:
+                template_row = group.iloc[[-1]].copy()
+
+            resolution_row = template_row.copy()
             resolution_row[COL_RESOLVED] = True
             resolution_row[COL_OUTCOME] = api_outcome
             group = pd.concat([group, resolution_row], ignore_index=True)
