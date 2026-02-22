@@ -6,7 +6,7 @@
 //!
 //! Additional fixes:
 //! - Preserves valid pre-expiry outcomes detected by logger (price/WS event)
-//! - Removes trailing incomplete market slug rows (logger stopped mid-market)
+//! - Fixes last row of trailing incomplete markets (sets resolved/outcome from API)
 //!
 //! Usage: cargo run --bin fix_csv_outcomes -- ./221data/
 //!
@@ -86,7 +86,6 @@ async fn process_file(
             slugs_fixed: 0,
             slugs_failed: 0,
             rows_fixed: 0,
-            rows_trimmed: 0,
         });
     }
 
@@ -156,7 +155,7 @@ async fn process_file(
         let cached_outcome = outcome_cache.get(slug);
 
         if let Some(outcome) = cached_outcome {
-            let is_expired = ttx.map(|t| t <= 0.0).unwrap_or(false);
+            let is_expired = ttx.map(|t| t <= 0.3).unwrap_or(false);
 
             let current_resolved = fields[COL_MARKET_RESOLVED].trim();
             let current_outcome = fields[COL_OUTCOME].trim();
@@ -169,6 +168,14 @@ async fn process_file(
             } else {
                 ("false", "")
             };
+
+            // Log when we find a wrong outcome
+            if !current_outcome.is_empty() && current_outcome != outcome.as_str() && is_expired {
+                println!(
+                    "    [FIX] found wrong outcome {}, api correct to {}  (slug: {})",
+                    current_outcome, outcome, slug
+                );
+            }
 
             // Check if anything actually changed
             let resolved_matches = current_resolved.eq_ignore_ascii_case(new_resolved);
@@ -198,43 +205,38 @@ async fn process_file(
         }
     }
 
-    // Detect and remove trailing incomplete market slug.
-    // If the last slug in the file never reached expiry (no rows with ttx <= 0),
-    // the logger was stopped mid-market — that data is incomplete and unusable.
-    let mut rows_trimmed = 0usize;
+    // Fix trailing incomplete market slug.
+    // If the last slug never reached expiry (no rows with ttx <= 0.3),
+    // the logger was stopped mid-market. Instead of removing rows,
+    // fix the last row's market_resolved and outcome from the API.
     if let Some(last_slug) = slugs_in_file.last() {
-        // Check if any row for the last slug has ttx <= 0 (reached expiry)
         let last_slug_reached_expiry = data_lines.iter().any(|line| {
             let fields: Vec<&str> = line.split(',').collect();
             if fields.len() < EXPECTED_MIN_COLS {
                 return false;
             }
             fields[COL_MARKET_SLUG] == last_slug.as_str()
-                && extract_ttx(&fields).map(|t| t <= 0.0).unwrap_or(false)
+                && extract_ttx(&fields).map(|t| t <= 0.3).unwrap_or(false)
         });
 
         if !last_slug_reached_expiry {
-            // Remove all rows for this incomplete trailing slug from output.
-            // output_lines[0] is the header, data rows start at index 1.
-            let before_trim = output_lines.len();
-            output_lines.retain(|line| {
-                // Always keep the header (first line)
-                if line == header {
-                    return true;
+            if let Some(api_outcome) = outcome_cache.get(last_slug) {
+                // Find the last row for this slug in output_lines and fix it
+                if let Some(last_idx) = output_lines.iter().rposition(|line| {
+                    let fields: Vec<&str> = line.split(',').collect();
+                    fields.len() >= EXPECTED_MIN_COLS && fields[COL_MARKET_SLUG] == last_slug.as_str()
+                }) {
+                    let fields: Vec<&str> = output_lines[last_idx].split(',').collect();
+                    let mut new_fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+                    new_fields[COL_MARKET_RESOLVED] = "true".to_string();
+                    new_fields[COL_OUTCOME] = api_outcome.clone();
+                    output_lines[last_idx] = new_fields.join(",");
+                    rows_fixed += 1;
+                    println!(
+                        "    [TAIL-FIX] Set last row resolved=true, outcome={} for incomplete trailing market: {}",
+                        api_outcome, last_slug
+                    );
                 }
-                // Remove rows belonging to the incomplete trailing slug
-                let fields: Vec<&str> = line.split(',').collect();
-                if fields.len() >= EXPECTED_MIN_COLS && fields[COL_MARKET_SLUG] == last_slug.as_str() {
-                    return false;
-                }
-                true
-            });
-            rows_trimmed = before_trim - output_lines.len();
-            if rows_trimmed > 0 {
-                println!(
-                    "    [TRIM] Removed {} rows for incomplete trailing market: {}",
-                    rows_trimmed, last_slug
-                );
             }
         }
     }
@@ -256,7 +258,6 @@ async fn process_file(
         slugs_fixed,
         slugs_failed,
         rows_fixed,
-        rows_trimmed,
     })
 }
 
@@ -266,7 +267,6 @@ struct FileStats {
     slugs_fixed: usize,
     slugs_failed: usize,
     rows_fixed: usize,
-    rows_trimmed: usize,
 }
 
 #[tokio::main]
@@ -308,8 +308,6 @@ async fn main() -> Result<()> {
     let mut total_rows_fixed = 0usize;
     let mut total_slugs_fixed = 0usize;
     let mut total_slugs_failed = 0usize;
-    let mut total_rows_trimmed = 0usize;
-
     for (i, csv_path) in csv_files.iter().enumerate() {
         let filename = csv_path
             .file_name()
@@ -325,15 +323,14 @@ async fn main() -> Result<()> {
         match process_file(&http, csv_path, &mut outcome_cache).await {
             Ok(stats) => {
                 println!(
-                    "  -> {} rows, {} slug(s), {} fixed, {} failed, {} rows updated, {} rows trimmed",
+                    "  -> {} rows, {} slug(s), {} fixed, {} failed, {} rows updated",
                     stats.total_rows,
                     stats.slugs_found,
                     stats.slugs_fixed,
                     stats.slugs_failed,
                     stats.rows_fixed,
-                    stats.rows_trimmed,
                 );
-                if stats.rows_fixed > 0 || stats.rows_trimmed > 0 {
+                if stats.rows_fixed > 0 {
                     println!("  -> Written: {}", fixed_path(csv_path).display());
                 } else {
                     println!("  -> No changes needed (fixed file still written)");
@@ -342,7 +339,6 @@ async fn main() -> Result<()> {
                 total_rows_fixed += stats.rows_fixed;
                 total_slugs_fixed += stats.slugs_fixed;
                 total_slugs_failed += stats.slugs_failed;
-                total_rows_trimmed += stats.rows_trimmed;
             }
             Err(e) => {
                 eprintln!("  -> ERROR: {} (skipping file)", e);
@@ -357,7 +353,6 @@ async fn main() -> Result<()> {
     println!("Slugs fixed:        {}", total_slugs_fixed);
     println!("Slugs failed:       {}", total_slugs_failed);
     println!("Total rows updated: {}", total_rows_fixed);
-    println!("Total rows trimmed: {} (incomplete trailing markets)", total_rows_trimmed);
     println!();
     println!("Outcome cache:");
     let mut cache_entries: Vec<_> = outcome_cache.iter().collect();
