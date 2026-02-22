@@ -758,7 +758,7 @@ async fn main() -> Result<()> {
             if let Some(result) = cached {
                 result
             } else if !gamma_fetch_in_progress.load(Ordering::SeqCst)
-                && (now_ms - gamma_last_outcome_fetch_ms >= 3000) {
+                && (now_ms - gamma_last_outcome_fetch_ms >= 100) {
                 gamma_last_outcome_fetch_ms = now_ms;
                 // Spawn non-blocking Gamma API fetch with generation guard
                 gamma_fetch_in_progress.store(true, Ordering::SeqCst);
