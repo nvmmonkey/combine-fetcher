@@ -48,6 +48,13 @@ const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 /// Maximum number of reconnection attempts before giving up (0 = infinite)
 const MAX_RECONNECT_ATTEMPTS: u32 = 0;
 
+/// Number of tokens per WS subscription batch.
+///
+/// Polymarket's server reliably delivers updates only for a small number of
+/// tokens per subscription request. Batching in pairs (YES + NO per market)
+/// matches the SDK example pattern and ensures all tokens receive updates.
+const POLY_WS_BATCH_SIZE: usize = 2;
+
 /// Silent disconnect threshold: if no data received for this long while "connected", log warning
 /// Increased to 90s to accommodate natural quiet periods in 15-min options markets
 /// This is now only used for logging, not for triggering reconnections
@@ -587,18 +594,34 @@ impl PolymarketOrderbookStream {
                     }
                 }
 
-                match ws_client.subscribe_best_bid_ask(asset_ids_price.clone()) {
-                    Ok(price_stream) => {
+                // Batch subscriptions: POLY_WS_BATCH_SIZE tokens per batch for server reliability.
+                // Polymarket's server only delivers updates for a small number of tokens per
+                // subscription request; batching YES+NO per market ensures all tokens receive updates.
+                let batched_price: Result<Vec<_>> = asset_ids_price
+                    .chunks(POLY_WS_BATCH_SIZE)
+                    .map(|batch| {
+                        ws_client
+                            .subscribe_best_bid_ask(batch.to_vec())
+                            .map_err(|e| anyhow::Error::from(e))
+                    })
+                    .collect();
+                match batched_price {
+                    Ok(price_streams) => {
                         // Successfully connected
                         let now_ms = chrono::Utc::now().timestamp_millis();
                         if reconnect_attempt > 0 {
                             last_price_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
                             info!(
-                                "[PRICE_STREAM] ✅ RECONNECTED successfully after {} attempts",
-                                reconnect_attempt
+                                "[PRICE_STREAM] ✅ RECONNECTED after {} attempts ({} batches)",
+                                reconnect_attempt,
+                                price_streams.len()
                             );
                         } else {
-                            info!("[PRICE_STREAM] ✅ CONNECTED - WebSocket stream active");
+                            info!(
+                                "[PRICE_STREAM] ✅ CONNECTED - {} batches ({} tokens)",
+                                price_streams.len(),
+                                asset_ids_price.len()
+                            );
                         }
 
                         // Mark all tokens as connected and reset error counts
@@ -611,7 +634,9 @@ impl PolymarketOrderbookStream {
                             }
                         }
 
-                        let mut stream = Box::pin(price_stream);
+                        let mut stream = Box::pin(futures::stream::select_all(
+                            price_streams.into_iter().map(|s| Box::pin(s)),
+                        ));
                         reconnect_attempt = 0;
                         reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -810,17 +835,31 @@ impl PolymarketOrderbookStream {
                     }
                 }
 
-                match ws_client.subscribe_orderbook(asset_ids_book.clone()) {
-                    Ok(book_stream) => {
+                // Batch subscriptions: POLY_WS_BATCH_SIZE tokens per batch for server reliability.
+                let batched_book: Result<Vec<_>> = asset_ids_book
+                    .chunks(POLY_WS_BATCH_SIZE)
+                    .map(|batch| {
+                        ws_client
+                            .subscribe_orderbook(batch.to_vec())
+                            .map_err(|e| anyhow::Error::from(e))
+                    })
+                    .collect();
+                match batched_book {
+                    Ok(book_streams) => {
                         let now_ms = chrono::Utc::now().timestamp_millis();
                         if reconnect_attempt > 0 {
                             last_book_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
                             info!(
-                                "[BOOK_STREAM] ✅ RECONNECTED successfully after {} attempts",
-                                reconnect_attempt
+                                "[BOOK_STREAM] ✅ RECONNECTED after {} attempts ({} batches)",
+                                reconnect_attempt,
+                                book_streams.len()
                             );
                         } else {
-                            info!("[BOOK_STREAM] ✅ CONNECTED - WebSocket stream active");
+                            info!(
+                                "[BOOK_STREAM] ✅ CONNECTED - {} batches ({} tokens)",
+                                book_streams.len(),
+                                asset_ids_book.len()
+                            );
                         }
 
                         // Mark tokens as connected
@@ -833,7 +872,9 @@ impl PolymarketOrderbookStream {
                             }
                         }
 
-                        let mut stream = Box::pin(book_stream);
+                        let mut stream = Box::pin(futures::stream::select_all(
+                            book_streams.into_iter().map(|s| Box::pin(s)),
+                        ));
                         reconnect_attempt = 0;
                         reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -1164,22 +1205,27 @@ impl PolymarketOrderbookStream {
                             let mid_req = MidpointRequest::builder().token_id(token_id).build();
                             let result: Result<(String, f64, f64), String> = match clob_client.midpoint(&mid_req).await {
                                 Ok(mid_resp) => {
-                                    if let Some(mid) = mid_resp.mid.to_f64() {
-                                        // Fetch last trade price from REST API
-                                        let last_req = LastTradePriceRequest::builder()
-                                            .token_id(token_id)
-                                            .build();
-                                        let last_trade = clob_client
-                                            .last_trade_price(&last_req)
-                                            .await
-                                            .ok()
-                                            .and_then(|t| t.price.to_f64())
-                                            .unwrap_or(0.0);
+                                    // Always fetch last trade price regardless of midpoint availability
+                                    let last_req = LastTradePriceRequest::builder()
+                                        .token_id(token_id)
+                                        .build();
+                                    let last_trade = clob_client
+                                        .last_trade_price(&last_req)
+                                        .await
+                                        .ok()
+                                        .and_then(|t| t.price.to_f64())
+                                        .unwrap_or(0.0);
 
-                                        Ok((token_id_str.clone(), mid, last_trade))
-                                    } else {
-                                        Err("midpoint response had no valid price".to_string())
-                                    }
+                                    // Use midpoint if valid; fall back to last_trade for illiquid
+                                    // markets. Return Ok with mid=0.0 when both are unavailable —
+                                    // this ensures last_update_ms is still refreshed so lag doesn't
+                                    // grow forever for markets with no trading activity.
+                                    let mid = mid_resp.mid.to_f64()
+                                        .filter(|&m| m > 0.0)
+                                        .or_else(|| if last_trade > 0.0 { Some(last_trade) } else { None })
+                                        .unwrap_or(0.0);
+
+                                    Ok((token_id_str.clone(), mid, last_trade))
                                 }
                                 // M3: Capture error details for 429/425 detection
                                 Err(e) => Err(format!("{}", e)),
@@ -1204,19 +1250,25 @@ impl PolymarketOrderbookStream {
                                 .entry(token_id_str.clone())
                                 .or_insert_with(|| TokenPrices::new(token_id_str.clone()));
 
-                            let mid_dec = rust_decimal::Decimal::from_f64(mid)
-                                .unwrap_or(rust_decimal::Decimal::ZERO);
-                            prices.mid_price = Some(mid_dec);
-                            prices.last_trade = Some(last_trade);
-
-                            // M6: Update synthetic best_bid/best_ask from REST midpoint
-                            // Prevents stale WS bid/ask values from persisting when only REST is working
-                            let half_spread = Decimal::from_str("0.0005").unwrap();
-                            prices.best_bid = Some(mid_dec - half_spread);
-                            prices.best_ask = Some(mid_dec + half_spread);
-
+                            // Always update the timestamp — prevents frozen lag for illiquid
+                            // markets where midpoint/last_trade return 0 (API responded, no trading).
                             prices.last_update_ms = now_ms;
                             prices.api_fallback_count += 1;
+
+                            if mid > 0.0 {
+                                let mid_dec = rust_decimal::Decimal::from_f64(mid)
+                                    .unwrap_or(rust_decimal::Decimal::ZERO);
+                                prices.mid_price = Some(mid_dec);
+
+                                // M6: Update synthetic best_bid/best_ask from REST midpoint
+                                let half_spread = Decimal::from_str("0.0005").unwrap();
+                                prices.best_bid = Some(mid_dec - half_spread);
+                                prices.best_ask = Some(mid_dec + half_spread);
+                            }
+
+                            if last_trade > 0.0 {
+                                prices.last_trade = Some(last_trade);
+                            }
 
                             let update = PolyPriceUpdate {
                                 token_id: token_id_str.clone(),
@@ -1236,11 +1288,18 @@ impl PolymarketOrderbookStream {
                             };
                             tokens_using_fallback.push(short_id.to_string());
 
-                            debug!(
-                                "[REST_FALLBACK] API update for {}: mid={:.4} bid={:.4} ask={:.4}",
-                                short_id, mid,
-                                (mid - 0.0005), (mid + 0.0005)
-                            );
+                            if mid > 0.0 {
+                                debug!(
+                                    "[REST_FALLBACK] API update for {}: mid={:.4} bid={:.4} ask={:.4}",
+                                    short_id, mid,
+                                    (mid - 0.0005), (mid + 0.0005)
+                                );
+                            } else {
+                                debug!(
+                                    "[REST_FALLBACK] ⏱ Timestamp-only for {} (illiquid, no prices)",
+                                    short_id
+                                );
+                            }
                         }
                         Err(err_msg) => {
                             rest_errors.push(err_msg);

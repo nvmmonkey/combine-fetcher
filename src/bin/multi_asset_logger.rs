@@ -611,8 +611,15 @@ async fn main() -> Result<()> {
             let yes_prices = poly_stream.get_prices(&ms.market.yes_token_id);
             let no_prices = poly_stream.get_prices(&ms.market.no_token_id);
 
-            let poly_yes_update_ms = yes_prices.as_ref().map(|p| p.last_update_ms).unwrap_or(now_ms);
-            let poly_no_update_ms = no_prices.as_ref().map(|p| p.last_update_ms).unwrap_or(now_ms);
+            // Treat last_update_ms == 0 as "never updated" — substitute now_ms to avoid
+            // computing lag as (binance_ts - 0) = a huge misleading number during startup
+            // or when REST fallback hasn't run yet for illiquid markets.
+            let poly_yes_update_ms = yes_prices.as_ref()
+                .map(|p| if p.last_update_ms > 0 { p.last_update_ms } else { now_ms })
+                .unwrap_or(now_ms);
+            let poly_no_update_ms = no_prices.as_ref()
+                .map(|p| if p.last_update_ms > 0 { p.last_update_ms } else { now_ms })
+                .unwrap_or(now_ms);
             let binance_update_ms = snapshot.timestamp;
             let poly_avg_update = (poly_yes_update_ms + poly_no_update_ms) / 2;
             let latency_ms = binance_update_ms - poly_avg_update;
@@ -752,14 +759,23 @@ async fn main() -> Result<()> {
 
             // --- Compact logging (every 100 ticks) ---
             if tick % 100 == 0 {
+                let lag_display = {
+                    let yes_has_data = yes_prices.as_ref().map(|p| p.last_update_ms > 0).unwrap_or(false);
+                    let no_has_data = no_prices.as_ref().map(|p| p.last_update_ms > 0).unwrap_or(false);
+                    if yes_has_data && no_has_data {
+                        format!("{}ms", latency_ms)
+                    } else {
+                        "N/A".to_string()
+                    }
+                };
                 info!(
-                    "[{}] #{} {} TTX={:.1}m | ${:.0} | Y:{:.2}@{:.0} N:{:.2}@{:.0} | Vol:{:.1}% \u{0394}:{:.4} | Lag={}ms | {} | {}",
+                    "[{}] #{} {} TTX={:.1}m | ${:.0} | Y:{:.2}@{:.0} N:{:.2}@{:.0} | Vol:{:.1}% \u{0394}:{:.4} | Lag={} | {} | {}",
                     ms.tag, tick, ms.market.unique_id, ttx,
                     snapshot.spot_price,
                     yes_bid, yes_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
                     no_bid, no_prices.as_ref().map(|p| p.best_bid_size).unwrap_or(0.0),
                     snapshot.realized_volatility * 100.0, greeks.delta,
-                    latency_ms, snapshot.volatility_regime, vol_data_source,
+                    lag_display, snapshot.volatility_regime, vol_data_source,
                 );
             }
 
