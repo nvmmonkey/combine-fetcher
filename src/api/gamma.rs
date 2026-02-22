@@ -177,12 +177,16 @@ pub async fn fetch_outcome(client: &reqwest::Client, slug: &str) -> Result<Strin
                 let down_idx = outcomes.iter().position(|o| o == "Down");
 
                 if let (Some(ui), Some(di)) = (up_idx, down_idx) {
-                    let up_price = prices[ui].parse::<f64>().unwrap_or(0.0);
-                    let down_price = prices[di].parse::<f64>().unwrap_or(0.0);
-                    if up_price >= 0.95 {
-                        return Ok("YES".to_string());
-                    } else if down_price >= 0.95 {
-                        return Ok("NO".to_string());
+                    // Only trust outcomePrices when market is confirmed closed on-chain
+                    let is_closed = m["closed"].as_bool().unwrap_or(false);
+                    if is_closed {
+                        let up_price = prices[ui].parse::<f64>().unwrap_or(0.0);
+                        let down_price = prices[di].parse::<f64>().unwrap_or(0.0);
+                        if up_price >= 0.95 {
+                            return Ok("YES".to_string());
+                        } else if down_price >= 0.95 {
+                            return Ok("NO".to_string());
+                        }
                     }
                 }
             }

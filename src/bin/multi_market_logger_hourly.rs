@@ -624,6 +624,7 @@ async fn main() -> Result<()> {
     let gamma_fetch_in_progress = Arc::new(AtomicBool::new(false));
     // Generation counter: prevents stale outcome from previous market leaking into new one
     let gamma_generation = Arc::new(AtomicU64::new(0));
+    let mut gamma_last_outcome_fetch_ms: i64 = 0;
 
     info!("Starting enhanced data collection with hourly rotation...");
 
@@ -756,7 +757,9 @@ async fn main() -> Result<()> {
             let cached = gamma_outcome.lock().unwrap().clone();
             if let Some(result) = cached {
                 result
-            } else if !gamma_fetch_in_progress.load(Ordering::SeqCst) {
+            } else if !gamma_fetch_in_progress.load(Ordering::SeqCst)
+                && (now_ms - gamma_last_outcome_fetch_ms >= 3000) {
+                gamma_last_outcome_fetch_ms = now_ms;
                 // Spawn non-blocking Gamma API fetch with generation guard
                 gamma_fetch_in_progress.store(true, Ordering::SeqCst);
                 let cache = gamma_outcome.clone();
@@ -1049,6 +1052,7 @@ async fn main() -> Result<()> {
                         // Reset failure counter and grace timer on successful rotation
                         consecutive_fetch_failures = 0;
                         resolution_grace_start_ms = 0;
+                        gamma_last_outcome_fetch_ms = 0;
 
                         // Fetch strike for the new market (infinite retry, no fallback)
                         println!(
