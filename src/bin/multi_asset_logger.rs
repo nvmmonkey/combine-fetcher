@@ -352,6 +352,7 @@ struct MarketState {
     gamma_generation: Arc<AtomicU64>,
     consecutive_fetch_failures: u32,
     last_fetch_attempt_ms: i64,
+    gamma_last_outcome_fetch_ms: i64,
     resolution_grace_start_ms: i64,
     tag: String,
 }
@@ -424,6 +425,7 @@ async fn main() -> Result<()> {
                     gamma_generation: Arc::new(AtomicU64::new(0)),
                     consecutive_fetch_failures: 0,
                     last_fetch_attempt_ms: 0,
+                    gamma_last_outcome_fetch_ms: 0,
                     resolution_grace_start_ms: 0,
                     tag,
                 });
@@ -601,6 +603,7 @@ async fn main() -> Result<()> {
         tick += 1;
 
         // Process each market
+        let mut needs_resubscribe = false;
         for ms in &mut market_states {
             let cfg = &MARKETS[ms.config_idx];
             let sym = cfg.binance_symbol;
@@ -670,7 +673,9 @@ async fn main() -> Result<()> {
                 let cached = ms.gamma_outcome.lock().unwrap().clone();
                 if let Some(result) = cached {
                     result
-                } else if !ms.gamma_fetch_in_progress.load(Ordering::SeqCst) {
+                } else if !ms.gamma_fetch_in_progress.load(Ordering::SeqCst)
+                    && (now_ms - ms.gamma_last_outcome_fetch_ms >= 3000) {
+                    ms.gamma_last_outcome_fetch_ms = now_ms;
                     // Spawn async Gamma API fetch with generation guard to prevent
                     // stale results from a previous market leaking into a new one
                     ms.gamma_fetch_in_progress.store(true, Ordering::SeqCst);
@@ -892,6 +897,7 @@ async fn main() -> Result<()> {
                             *ms.gamma_outcome.lock().unwrap() = None;
                             ms.gamma_fetch_in_progress.store(false, Ordering::SeqCst);
                             ms.consecutive_fetch_failures = 0;
+                            ms.gamma_last_outcome_fetch_ms = 0;
                             ms.resolution_grace_start_ms = 0;
 
                             // Fetch strike for new market
@@ -908,12 +914,11 @@ async fn main() -> Result<()> {
                                 Err(e) => warn!("[{}] Strike fetch failed: {}", ms.tag, e),
                             }
 
-                            // Re-subscribe to new tokens
-                            let new_tokens = vec![ms.market.yes_token_id.clone(), ms.market.no_token_id.clone()];
-                            let mut new_rx = poly_stream.clone().stream(new_tokens).await?;
-                            tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
-
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            // Flag for post-loop resubscribe with ALL tokens
+                            // (calling stream() here with only 2 tokens would kill
+                            // all other markets' WS streams — stream() increments
+                            // the generation counter, terminating all prior tasks)
+                            needs_resubscribe = true;
                         }
                         Err(e) => {
                             ms.consecutive_fetch_failures += 1;
@@ -923,6 +928,19 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+
+        // After any market rotation, re-subscribe ALL tokens so every market
+        // keeps its WS stream alive. stream() kills prior streams via generation
+        // counter, so we must pass the full set of active tokens.
+        if needs_resubscribe {
+            let all_tokens: Vec<String> = market_states.iter()
+                .flat_map(|ms| vec![ms.market.yes_token_id.clone(), ms.market.no_token_id.clone()])
+                .collect();
+            info!("[POLY] Re-subscribing all {} tokens after rotation", all_tokens.len());
+            let mut new_rx = poly_stream.clone().stream(all_tokens).await?;
+            tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
         // RTDS summary (every 500 ticks)
