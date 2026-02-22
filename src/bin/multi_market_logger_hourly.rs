@@ -605,6 +605,11 @@ async fn main() -> Result<()> {
     let mut last_fetch_attempt_ms: i64 = 0;
     const FETCH_RETRY_COOLDOWN_MS: i64 = 5000;
 
+    // Grace period: keep polling for outcome after TTX <= 0 before rotating
+    const RESOLUTION_GRACE_SECS: i64 = 30;
+    const RESOLUTION_GRACE_MS: i64 = RESOLUTION_GRACE_SECS * 1000;
+    let mut resolution_grace_start_ms: i64 = 0;
+
     // H3 FIX: Signal handling — graceful shutdown on SIGINT
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_signal = shutdown.clone();
@@ -920,8 +925,24 @@ async fn main() -> Result<()> {
             );
         }
 
-        // Check if market expired - rotate to next
-        if resolved {
+        // Check if market expired - start grace period, then rotate
+        // Start grace period timer when market first expires
+        if resolved && resolution_grace_start_ms == 0 {
+            resolution_grace_start_ms = now_ms;
+            info!("⏳ Market {} expired — starting {}s resolution grace period", current_market.unique_id, RESOLUTION_GRACE_SECS);
+        }
+
+        let grace_expired = resolution_grace_start_ms > 0
+            && (now_ms - resolution_grace_start_ms) >= RESOLUTION_GRACE_MS;
+        let has_outcome = !outcome.is_empty();
+
+        if resolved && (has_outcome || grace_expired) {
+            if grace_expired && !has_outcome {
+                warn!("⚠️ Resolution grace period expired with no outcome for {} — forcing rotation", current_market.unique_id);
+            } else if has_outcome {
+                info!("✅ Outcome '{}' detected during grace period — rotating", outcome);
+            }
+
             // Check if we need to cool down before retrying (prevent tight retry loops)
             let time_since_last_fetch_attempt = if last_fetch_attempt_ms > 0 {
                 now_ms.saturating_sub(last_fetch_attempt_ms)
@@ -1025,8 +1046,9 @@ async fn main() -> Result<()> {
                         *gamma_outcome.lock().unwrap() = None;
                         gamma_fetch_in_progress.store(false, Ordering::SeqCst);
 
-                        // Reset failure counter on successful rotation
+                        // Reset failure counter and grace timer on successful rotation
                         consecutive_fetch_failures = 0;
+                        resolution_grace_start_ms = 0;
 
                         // Fetch strike for the new market (infinite retry, no fallback)
                         println!(

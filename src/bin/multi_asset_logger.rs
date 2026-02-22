@@ -352,6 +352,7 @@ struct MarketState {
     gamma_generation: Arc<AtomicU64>,
     consecutive_fetch_failures: u32,
     last_fetch_attempt_ms: i64,
+    resolution_grace_start_ms: i64,
     tag: String,
 }
 
@@ -423,6 +424,7 @@ async fn main() -> Result<()> {
                     gamma_generation: Arc::new(AtomicU64::new(0)),
                     consecutive_fetch_failures: 0,
                     last_fetch_attempt_ms: 0,
+                    resolution_grace_start_ms: 0,
                     tag,
                 });
             }
@@ -534,6 +536,8 @@ async fn main() -> Result<()> {
 
     const MAX_CONSECUTIVE_FETCH_FAILURES: u32 = 10;
     const FETCH_RETRY_COOLDOWN_MS: i64 = 5000;
+    const RESOLUTION_GRACE_SECS: i64 = 30;
+    const RESOLUTION_GRACE_MS: i64 = RESOLUTION_GRACE_SECS * 1000;
 
     info!("Starting multi-asset data collection...\n");
 
@@ -780,7 +784,23 @@ async fn main() -> Result<()> {
             }
 
             // --- Market rotation ---
-            if resolved {
+            // Start grace period timer when market first expires
+            if resolved && ms.resolution_grace_start_ms == 0 {
+                ms.resolution_grace_start_ms = now_ms;
+                info!("[{}] ⏳ Market {} expired — starting {}s resolution grace period", ms.tag, ms.market.unique_id, RESOLUTION_GRACE_SECS);
+            }
+
+            let grace_expired = ms.resolution_grace_start_ms > 0
+                && (now_ms - ms.resolution_grace_start_ms) >= RESOLUTION_GRACE_MS;
+            let has_outcome = !outcome.is_empty();
+
+            if resolved && (has_outcome || grace_expired) {
+                if grace_expired && !has_outcome {
+                    warn!("[{}] ⚠️ Resolution grace period expired with no outcome — forcing rotation", ms.tag);
+                } else if has_outcome {
+                    info!("[{}] ✅ Outcome '{}' detected during grace period — rotating", ms.tag, outcome);
+                }
+
                 let time_since_last = if ms.last_fetch_attempt_ms > 0 {
                     now_ms.saturating_sub(ms.last_fetch_attempt_ms)
                 } else { i64::MAX };
@@ -872,6 +892,7 @@ async fn main() -> Result<()> {
                             *ms.gamma_outcome.lock().unwrap() = None;
                             ms.gamma_fetch_in_progress.store(false, Ordering::SeqCst);
                             ms.consecutive_fetch_failures = 0;
+                            ms.resolution_grace_start_ms = 0;
 
                             // Fetch strike for new market
                             match strike::fetch_strike_with_retry(&http, &ms.market, Some(strike::RetryConfig {
