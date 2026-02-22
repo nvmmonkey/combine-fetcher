@@ -674,7 +674,7 @@ async fn main() -> Result<()> {
                 if let Some(result) = cached {
                     result
                 } else if !ms.gamma_fetch_in_progress.load(Ordering::SeqCst)
-                    && (now_ms - ms.gamma_last_outcome_fetch_ms >= 3000) {
+                    && (now_ms - ms.gamma_last_outcome_fetch_ms >= 100) {
                     ms.gamma_last_outcome_fetch_ms = now_ms;
                     // Spawn async Gamma API fetch with generation guard to prevent
                     // stale results from a previous market leaking into a new one
