@@ -941,6 +941,35 @@ async fn main() -> Result<()> {
                     current_market.unique_id, ttx
                 );
 
+                // Ensure outcome is captured before rotation — blocking Gamma fetch
+                // prevents empty outcome rows when async fetch hasn't returned yet.
+                if outcome.is_empty() {
+                    info!("[OUTCOME] No outcome yet — blocking Gamma fetch before rotation");
+                    let final_outcome = match tokio::time::timeout(
+                        Duration::from_secs(3),
+                        gamma::fetch_outcome(&http, &current_market.slug),
+                    ).await {
+                        Ok(Ok(result)) => {
+                            info!("[OUTCOME] Blocking Gamma outcome: {}", result);
+                            result
+                        }
+                        Ok(Err(e)) => {
+                            warn!("[OUTCOME] Blocking Gamma fetch failed: {}", e);
+                            String::new()
+                        }
+                        Err(_) => {
+                            warn!("[OUTCOME] Blocking Gamma fetch timed out (3s)");
+                            String::new()
+                        }
+                    };
+                    if !final_outcome.is_empty() {
+                        let mut final_record = record.clone();
+                        final_record.outcome = final_outcome;
+                        csv_writer.write_record(&final_record)?;
+                        info!("[OUTCOME] Final resolution record written: {}", final_record.outcome);
+                    }
+                }
+
                 // Try WS new_market event first, fall back to Gamma API
                 let next_market_result = match market_events.take_new_market_for("btc-updown-15m-") {
                     Some(nm) if nm.outcomes.len() == 2 && nm.asset_ids.len() == 2 => {
