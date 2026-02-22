@@ -207,10 +207,10 @@ async fn process_file(
         }
     }
 
-    // Fix trailing incomplete market slug.
-    // If the last slug never reached expiry (no rows with ttx <= 0.3),
-    // the logger was stopped mid-market. Instead of removing rows,
-    // fix the last row's market_resolved and outcome from the API.
+    // Fix trailing incomplete market slug — but ONLY if it was genuinely
+    // near expiry (logger stopped mid-market). If the last slug's final row
+    // has a high TTX (> 2 min), this is an hourly rotation split and the
+    // slug continues in the next file — don't touch it.
     if let Some(last_slug) = slugs_in_file.last() {
         let last_slug_reached_expiry = data_lines.iter().any(|line| {
             let fields: Vec<&str> = line.split(',').collect();
@@ -222,23 +222,43 @@ async fn process_file(
         });
 
         if !last_slug_reached_expiry {
-            if let Some(api_outcome) = outcome_cache.get(last_slug) {
-                // Find the last row for this slug in output_lines and fix it
-                if let Some(last_idx) = output_lines.iter().rposition(|line| {
+            // Check the last row's TTX — if it's high, this slug was split
+            // by hourly rotation and continues in the next file.
+            let last_row_ttx = data_lines.iter().rev()
+                .find_map(|line| {
                     let fields: Vec<&str> = line.split(',').collect();
-                    fields.len() >= EXPECTED_MIN_COLS && fields[COL_MARKET_SLUG] == last_slug.as_str()
-                }) {
-                    let fields: Vec<&str> = output_lines[last_idx].split(',').collect();
-                    let mut new_fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
-                    new_fields[COL_MARKET_RESOLVED] = "true".to_string();
-                    new_fields[COL_OUTCOME] = api_outcome.clone();
-                    output_lines[last_idx] = new_fields.join(",");
-                    rows_fixed += 1;
-                    println!(
-                        "    [TAIL-FIX] Set last row resolved=true, outcome={} for incomplete trailing market: {}",
-                        api_outcome, last_slug
-                    );
+                    if fields.len() >= EXPECTED_MIN_COLS && fields[COL_MARKET_SLUG] == last_slug.as_str() {
+                        extract_ttx(&fields)
+                    } else {
+                        None
+                    }
+                });
+
+            let is_near_expiry = last_row_ttx.map(|t| t <= 2.0).unwrap_or(false);
+
+            if is_near_expiry {
+                if let Some(api_outcome) = outcome_cache.get(last_slug) {
+                    if let Some(last_idx) = output_lines.iter().rposition(|line| {
+                        let fields: Vec<&str> = line.split(',').collect();
+                        fields.len() >= EXPECTED_MIN_COLS && fields[COL_MARKET_SLUG] == last_slug.as_str()
+                    }) {
+                        let fields: Vec<&str> = output_lines[last_idx].split(',').collect();
+                        let mut new_fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+                        new_fields[COL_MARKET_RESOLVED] = "true".to_string();
+                        new_fields[COL_OUTCOME] = api_outcome.clone();
+                        output_lines[last_idx] = new_fields.join(",");
+                        rows_fixed += 1;
+                        println!(
+                            "    [TAIL-FIX] Set last row resolved=true, outcome={} for incomplete trailing market: {} (ttx={:.1}m)",
+                            api_outcome, last_slug, last_row_ttx.unwrap_or(0.0)
+                        );
+                    }
                 }
+            } else if let Some(ttx) = last_row_ttx {
+                println!(
+                    "    [SKIP] Trailing slug {} has ttx={:.1}m — hourly rotation split, continues in next file",
+                    last_slug, ttx
+                );
             }
         }
     }
