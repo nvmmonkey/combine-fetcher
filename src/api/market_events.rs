@@ -29,6 +29,12 @@ const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 /// Pattern filter for new_market events — only keep updown markets.
 const UPDOWN_PATTERN: &str = "-updown-";
 
+/// Helper: extract slug from SDK types that may be String or Option<String>
+/// depending on SDK version. Works with both via Into<Option<String>>.
+fn extract_slug(slug: impl Into<Option<String>>) -> Option<String> {
+    slug.into()
+}
+
 // ---------------------------------------------------------------------------
 // Our own simplified event types (don't leak SDK types into the binary)
 // ---------------------------------------------------------------------------
@@ -232,13 +238,19 @@ async fn connect_new_market(
             Ok(nm) => {
                 count += 1;
 
+                // Handle slug as String or Option<String> (varies by SDK version)
+                let slug = match extract_slug(nm.slug) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
                 // Only keep events matching *-updown-* pattern
-                if !nm.slug.contains(UPDOWN_PATTERN) {
+                if !slug.contains(UPDOWN_PATTERN) {
                     continue;
                 }
 
                 let event = NewMarketEvent {
-                    slug: nm.slug.clone(),
+                    slug: slug.clone(),
                     asset_ids: nm.asset_ids.iter().map(|id| id.to_string()).collect(),
                     outcomes: nm.outcomes,
                     timestamp: nm.timestamp,
@@ -250,7 +262,7 @@ async fn connect_new_market(
                 );
 
                 if let Ok(mut map) = store.lock() {
-                    map.insert(nm.slug, event);
+                    map.insert(slug, event);
                 }
             }
             Err(e) => {
@@ -277,8 +289,14 @@ async fn connect_market_resolved(
             Ok(mr) => {
                 count += 1;
 
+                // Handle slug as String or Option<String> (varies by SDK version)
+                let slug = match extract_slug(mr.slug) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
                 let event = MarketResolvedEvent {
-                    slug: mr.slug.clone(),
+                    slug: slug.clone(),
                     winning_outcome: mr.winning_outcome,
                     winning_asset_id: mr.winning_asset_id.to_string(),
                     timestamp: mr.timestamp,
@@ -290,7 +308,7 @@ async fn connect_market_resolved(
                 );
 
                 if let Ok(mut map) = store.lock() {
-                    map.insert(mr.slug, event);
+                    map.insert(slug, event);
                 }
             }
             Err(e) => {
