@@ -890,15 +890,19 @@ async fn main() -> Result<()> {
 
         // RTDS summary (every 500 ticks)
         if tick % 500 == 0 {
-            let (total_b, total_c) = multi_rtds.total_update_counts();
-            let btc_rtds = rtds_per_asset.get("btc").cloned().unwrap_or_default();
-            info!(
-                "[RTDS] BTC B_dev={:.1}bps C_dev={:.1}bps adv={:.1}bps | stale=B:{}ms/C:{}ms | total_updates=B:{}/C:{}",
-                btc_rtds.rtds_binance_dev_bps, btc_rtds.rtds_chainlink_dev_bps,
-                btc_rtds.rtds_price_advantage_bps,
-                btc_rtds.rtds_binance_stale_ms, btc_rtds.rtds_chainlink_stale_ms,
-                total_b, total_c,
-            );
+            for asset in &["btc", "eth", "sol", "xrp"] {
+                if let Some(rtds) = rtds_per_asset.get(*asset) {
+                    let (asset_b, asset_c) = multi_rtds.update_counts(asset);
+                    info!(
+                        "[RTDS] {:<3} B_dev={:+.1}bps C_dev={:+.1}bps adv={:.1}bps stale=B:{}ms/C:{}ms n=B:{}/C:{}",
+                        asset.to_uppercase(),
+                        rtds.rtds_binance_dev_bps, rtds.rtds_chainlink_dev_bps,
+                        rtds.rtds_price_advantage_bps,
+                        rtds.rtds_binance_stale_ms, rtds.rtds_chainlink_stale_ms,
+                        asset_b, asset_c,
+                    );
+                }
+            }
         }
 
         // Periodic volatility refresh (every ~5 min)
