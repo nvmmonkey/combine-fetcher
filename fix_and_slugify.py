@@ -31,7 +31,7 @@ import requests
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 HTTP_TIMEOUT = 10
 API_DELAY = 0.2  # seconds between API calls (polite rate limiting)
-MIN_ROWS_PER_SLUG = 30000  # slugs with fewer rows are incomplete — skip
+MIN_ROWS_PER_SLUG = 10000  # slugs with fewer rows are incomplete — skip
 TTX_COMPLETE_THRESHOLD = 2.0  # slug must have a row with ttx <= this to be considered complete
 
 # CSV column names
@@ -157,6 +157,15 @@ def write_per_slug(df: pd.DataFrame, output_dir: str, outcome_cache: dict) -> li
             if api_outcome:
                 outcome_cache[slug] = api_outcome
             time.sleep(API_DELAY)
+
+        # Check for wrong outcomes already in the data vs API
+        if api_outcome:
+            existing = group[COL_OUTCOME].dropna().astype(str).str.strip()
+            existing = existing[~existing.isin(["", "nan", "None"])]
+            wrong = existing[existing != api_outcome]
+            if len(wrong) > 0:
+                wrong_val = wrong.iloc[0]
+                print(f"    [FIX] found wrong outcome {wrong_val}, api correct to {api_outcome}  (slug: {slug}, {len(wrong)} rows)")
 
         # Append synthetic resolution row: copy of last row with resolved=True + outcome
         if api_outcome:
