@@ -48,13 +48,6 @@ const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 /// Maximum number of reconnection attempts before giving up (0 = infinite)
 const MAX_RECONNECT_ATTEMPTS: u32 = 0;
 
-/// Number of tokens per WS subscription batch.
-///
-/// Polymarket's server reliably delivers updates only for a small number of
-/// tokens per subscription request. Batching in pairs (YES + NO per market)
-/// matches the SDK example pattern and ensures all tokens receive updates.
-const POLY_WS_BATCH_SIZE: usize = 2;
-
 /// Silent disconnect threshold: if no data received for this long while "connected", log warning
 /// Increased to 90s to accommodate natural quiet periods in 15-min options markets
 /// This is now only used for logging, not for triggering reconnections
@@ -594,34 +587,18 @@ impl PolymarketOrderbookStream {
                     }
                 }
 
-                // Batch subscriptions: POLY_WS_BATCH_SIZE tokens per batch for server reliability.
-                // Polymarket's server only delivers updates for a small number of tokens per
-                // subscription request; batching YES+NO per market ensures all tokens receive updates.
-                let batched_price: Result<Vec<_>> = asset_ids_price
-                    .chunks(POLY_WS_BATCH_SIZE)
-                    .map(|batch| {
-                        ws_client
-                            .subscribe_best_bid_ask(batch.to_vec())
-                            .map_err(|e| anyhow::Error::from(e))
-                    })
-                    .collect();
-                match batched_price {
-                    Ok(price_streams) => {
+                match ws_client.subscribe_best_bid_ask(asset_ids_price.clone()) {
+                    Ok(price_stream) => {
                         // Successfully connected
                         let now_ms = chrono::Utc::now().timestamp_millis();
                         if reconnect_attempt > 0 {
                             last_price_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
                             info!(
-                                "[PRICE_STREAM] ✅ RECONNECTED after {} attempts ({} batches)",
-                                reconnect_attempt,
-                                price_streams.len()
+                                "[PRICE_STREAM] ✅ RECONNECTED successfully after {} attempts",
+                                reconnect_attempt
                             );
                         } else {
-                            info!(
-                                "[PRICE_STREAM] ✅ CONNECTED - {} batches ({} tokens)",
-                                price_streams.len(),
-                                asset_ids_price.len()
-                            );
+                            info!("[PRICE_STREAM] ✅ CONNECTED - WebSocket stream active");
                         }
 
                         // Mark all tokens as connected and reset error counts
@@ -634,9 +611,7 @@ impl PolymarketOrderbookStream {
                             }
                         }
 
-                        let mut stream = Box::pin(futures::stream::select_all(
-                            price_streams.into_iter().map(|s| Box::pin(s)),
-                        ));
+                        let mut stream = Box::pin(price_stream);
                         reconnect_attempt = 0;
                         reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -835,31 +810,17 @@ impl PolymarketOrderbookStream {
                     }
                 }
 
-                // Batch subscriptions: POLY_WS_BATCH_SIZE tokens per batch for server reliability.
-                let batched_book: Result<Vec<_>> = asset_ids_book
-                    .chunks(POLY_WS_BATCH_SIZE)
-                    .map(|batch| {
-                        ws_client
-                            .subscribe_orderbook(batch.to_vec())
-                            .map_err(|e| anyhow::Error::from(e))
-                    })
-                    .collect();
-                match batched_book {
-                    Ok(book_streams) => {
+                match ws_client.subscribe_orderbook(asset_ids_book.clone()) {
+                    Ok(book_stream) => {
                         let now_ms = chrono::Utc::now().timestamp_millis();
                         if reconnect_attempt > 0 {
                             last_book_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
                             info!(
-                                "[BOOK_STREAM] ✅ RECONNECTED after {} attempts ({} batches)",
-                                reconnect_attempt,
-                                book_streams.len()
+                                "[BOOK_STREAM] ✅ RECONNECTED successfully after {} attempts",
+                                reconnect_attempt
                             );
                         } else {
-                            info!(
-                                "[BOOK_STREAM] ✅ CONNECTED - {} batches ({} tokens)",
-                                book_streams.len(),
-                                asset_ids_book.len()
-                            );
+                            info!("[BOOK_STREAM] ✅ CONNECTED - WebSocket stream active");
                         }
 
                         // Mark tokens as connected
@@ -872,9 +833,7 @@ impl PolymarketOrderbookStream {
                             }
                         }
 
-                        let mut stream = Box::pin(futures::stream::select_all(
-                            book_streams.into_iter().map(|s| Box::pin(s)),
-                        ));
+                        let mut stream = Box::pin(book_stream);
                         reconnect_attempt = 0;
                         reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
