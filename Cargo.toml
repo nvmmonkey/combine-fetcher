@@ -28,9 +28,6 @@ path = "src/bin/multi_asset_logger.rs"
 name = "debug_resolution"
 path = "src/bin/debug_resolution.rs"
 
-[[bin]]
-name = "fix_csv_outcomes"
-path = "src/bin/fix_csv_outcomes.rs"
 
 # [[bin]]
 # name = "test_binance_bootstrap"
