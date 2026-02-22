@@ -30,6 +30,7 @@ GAMMA_API_URL = "https://gamma-api.polymarket.com"
 HTTP_TIMEOUT = 10
 API_DELAY = 0.2  # seconds between API calls (polite rate limiting)
 TTX_EXPIRY_THRESHOLD = 0.3  # minutes — rows with ttx <= this are considered expired
+MIN_ROWS_PER_SLUG = 30000  # slugs with fewer rows are incomplete/useless — skip them
 
 # CSV column names
 COL_SLUG = "market_slug"
@@ -194,8 +195,14 @@ def write_per_slug(df: pd.DataFrame, output_dir: str) -> list[dict]:
     slugs = sorted(df[COL_SLUG].dropna().unique())
     print(f"\nWriting {len(slugs)} slug files to {output_dir}/\n")
 
+    skipped = 0
     for slug in slugs:
         group = df[df[COL_SLUG] == slug].copy()
+
+        if len(group) < MIN_ROWS_PER_SLUG:
+            skipped += 1
+            print(f"  {slug}: {len(group):,} rows  [SKIP < {MIN_ROWS_PER_SLUG:,}]")
+            continue
 
         # Sort by timestamp to ensure correct order after concat
         if "timestamp" in group.columns:
@@ -214,6 +221,9 @@ def write_per_slug(df: pd.DataFrame, output_dir: str) -> list[dict]:
 
         print(f"  {slug}: {len(group):,} rows  outcome={last_outcome or '?'}")
         summary.append({"slug": slug, "rows": len(group), "outcome": last_outcome, "file": out_path})
+
+    if skipped:
+        print(f"\n  Skipped {skipped} slug(s) with < {MIN_ROWS_PER_SLUG:,} rows")
 
     return summary
 
