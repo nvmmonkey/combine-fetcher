@@ -8,6 +8,7 @@ pub mod gamma;
 pub mod market_events;
 pub mod polymarket;
 pub mod rtds_tracker;
+pub mod rtds_tracker_multi;
 pub mod strike;
 
 pub use binance::{BinanceDataManager, BinancePrice};

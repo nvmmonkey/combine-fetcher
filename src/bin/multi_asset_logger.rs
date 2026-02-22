@@ -22,7 +22,8 @@ use combine_fetcher::api::binance::BinanceDataManager;
 use combine_fetcher::api::gamma;
 use combine_fetcher::api::market_events::MarketEventStream;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
-use combine_fetcher::api::rtds_tracker::{RtdsSnapshot, RtdsTracker};
+use combine_fetcher::api::rtds_tracker::RtdsSnapshot;
+use combine_fetcher::api::rtds_tracker_multi::MultiAssetRtdsTracker;
 use combine_fetcher::api::strike;
 use combine_fetcher::{CSV_RECORD_INTERVAL_SEC, HTTP_TIMEOUT_SECS, MINUTES_PER_YEAR};
 
@@ -499,10 +500,10 @@ async fn main() -> Result<()> {
     println!("Polymarket connected ({} tokens)", market_states.len() * 2);
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // --- Setup RTDS (BTC only) ---
-    let mut rtds_tracker = RtdsTracker::new();
-    rtds_tracker.start();
-    println!("RTDS tracker connected (BTC only)");
+    // --- Setup RTDS (all assets) ---
+    let mut multi_rtds = MultiAssetRtdsTracker::new(&["btc", "eth", "sol", "xrp"]);
+    multi_rtds.start();
+    println!("RTDS tracker connected (BTC/ETH/SOL/XRP)");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // --- Setup Market Event Stream (WS new_market + market_resolved) ---
@@ -577,14 +578,21 @@ async fn main() -> Result<()> {
             }
         }
 
-        // RTDS snapshot (BTC reference price)
-        let btc_snap = binance_snapshots.get("BTCUSDT");
-        let rtds = if let Some(snap) = btc_snap {
-            rtds_tracker.get_snapshot(snap.spot_price, snap.timestamp)
-        } else {
-            RtdsSnapshot::default()
-        };
-        let rtds_default = RtdsSnapshot::default();
+        // RTDS snapshots per asset (pre-computed once, shared across same-asset markets)
+        let mut rtds_per_asset: HashMap<String, RtdsSnapshot> = HashMap::new();
+        for (binance_sym, asset) in &[
+            ("BTCUSDT", "btc"),
+            ("ETHUSDT", "eth"),
+            ("SOLUSDT", "sol"),
+            ("XRPUSDT", "xrp"),
+        ] {
+            if let Some(snap) = binance_snapshots.get(*binance_sym) {
+                rtds_per_asset.insert(
+                    asset.to_string(),
+                    multi_rtds.get_snapshot(asset, snap.spot_price, snap.timestamp),
+                );
+            }
+        }
 
         tick += 1;
 
@@ -690,8 +698,8 @@ async fn main() -> Result<()> {
                 snapshot.vol_source_path.clone()
             };
 
-            // RTDS: only meaningful for BTC markets
-            let r = if cfg.asset == "btc" { &rtds } else { &rtds_default };
+            let rtds_snap = rtds_per_asset.get(cfg.asset).cloned().unwrap_or_default();
+            let r = &rtds_snap;
 
             let record = CsvRecord {
                 timestamp: now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
@@ -880,15 +888,16 @@ async fn main() -> Result<()> {
             }
         }
 
-        // RTDS summary (every 500 ticks, BTC only)
+        // RTDS summary (every 500 ticks)
         if tick % 500 == 0 {
-            let (rtds_b_count, rtds_c_count) = rtds_tracker.update_counts();
+            let (total_b, total_c) = multi_rtds.total_update_counts();
+            let btc_rtds = rtds_per_asset.get("btc").cloned().unwrap_or_default();
             info!(
-                "[RTDS] B_dev={:.1}bps C_dev={:.1}bps adv={:.1}bps C-B={:.1}bps | stale=B:{}ms/C:{}ms | n=B:{}/C:{}",
-                rtds.rtds_binance_dev_bps, rtds.rtds_chainlink_dev_bps,
-                rtds.rtds_price_advantage_bps, rtds.rtds_chainlink_binance_spread_bps,
-                rtds.rtds_binance_stale_ms, rtds.rtds_chainlink_stale_ms,
-                rtds_b_count, rtds_c_count,
+                "[RTDS] BTC B_dev={:.1}bps C_dev={:.1}bps adv={:.1}bps | stale=B:{}ms/C:{}ms | total_updates=B:{}/C:{}",
+                btc_rtds.rtds_binance_dev_bps, btc_rtds.rtds_chainlink_dev_bps,
+                btc_rtds.rtds_price_advantage_bps,
+                btc_rtds.rtds_binance_stale_ms, btc_rtds.rtds_chainlink_stale_ms,
+                total_b, total_c,
             );
         }
 
