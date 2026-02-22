@@ -118,11 +118,11 @@ def load_all_csvs(csv_files: list[str]) -> pd.DataFrame:
 # ============================================================================
 
 def fix_outcomes(df: pd.DataFrame, outcome_cache: dict, session: requests.Session) -> pd.DataFrame:
-    """Fix market_resolved and outcome columns for all slugs."""
+    """Fix market_resolved and outcome columns for all slugs (vectorized)."""
     slugs = df[COL_SLUG].dropna().unique()
     print(f"Fetching outcomes for {len(slugs)} slugs...\n")
 
-    # Fetch outcomes for all slugs
+    # Fetch outcomes for all slugs (this is the only slow part — API calls)
     for slug in sorted(slugs):
         if slug in outcome_cache:
             continue
@@ -136,50 +136,47 @@ def fix_outcomes(df: pd.DataFrame, outcome_cache: dict, session: requests.Sessio
 
     print()
 
-    # Fix rows per slug
-    total_fixed = 0
-    total_wrong = 0
+    # Map each slug to its API outcome (NaN for slugs with no outcome)
+    df["_api_outcome"] = df[COL_SLUG].map(outcome_cache)
+    has_api = df["_api_outcome"].notna()
 
-    for slug in slugs:
-        api_outcome = outcome_cache.get(slug)
-        if not api_outcome:
-            continue
+    # Normalize outcome column — treat NaN/None as empty
+    df[COL_OUTCOME] = df[COL_OUTCOME].fillna("").astype(str).str.strip()
+    df.loc[df[COL_OUTCOME].isin(["nan", "None"]), COL_OUTCOME] = ""
 
-        mask = df[COL_SLUG] == slug
-        slug_df = df.loc[mask]
+    # Expired rows: ttx <= threshold
+    is_expired = df[COL_TTX].notna() & (df[COL_TTX] <= TTX_EXPIRY_THRESHOLD)
 
-        for idx in slug_df.index:
-            ttx = df.at[idx, COL_TTX]
-            current_resolved = str(df.at[idx, COL_RESOLVED]).strip().lower()
-            current_outcome = str(df.at[idx, COL_OUTCOME]).strip()
+    # Pre-expiry rows that already have a valid outcome (from logger WS/price detection)
+    has_existing_outcome = df[COL_OUTCOME] != ""
 
-            # Clean up NaN outcomes
-            if current_outcome in ("nan", "None", ""):
-                current_outcome = ""
+    # Log wrong outcomes (expired rows where existing outcome != API outcome)
+    wrong = has_api & is_expired & has_existing_outcome & (df[COL_OUTCOME] != df["_api_outcome"])
+    total_wrong = wrong.sum()
+    for _, row in df.loc[wrong].drop_duplicates(subset=[COL_SLUG, COL_OUTCOME]).iterrows():
+        print(f"    [FIX] found wrong outcome {row[COL_OUTCOME]}, api correct to {row['_api_outcome']}  (slug: {row[COL_SLUG]})")
 
-            is_expired = pd.notna(ttx) and float(ttx) <= TTX_EXPIRY_THRESHOLD
+    # Apply fixes — only where we have an API outcome
+    # 1. Expired rows: set resolved=True, outcome=API
+    expired_fix = has_api & is_expired
+    old_outcomes = df.loc[expired_fix, COL_OUTCOME].copy()
+    old_resolved = df.loc[expired_fix, COL_RESOLVED].copy()
+    df.loc[expired_fix, COL_RESOLVED] = True
+    df.loc[expired_fix, COL_OUTCOME] = df.loc[expired_fix, "_api_outcome"]
 
-            if is_expired:
-                new_resolved = True
-                new_outcome = api_outcome
+    # 2. Non-expired rows WITHOUT existing outcome: set resolved=False, outcome=""
+    clear_fix = has_api & ~is_expired & ~has_existing_outcome
+    df.loc[clear_fix, COL_RESOLVED] = False
+    df.loc[clear_fix, COL_OUTCOME] = ""
 
-                # Log wrong outcomes
-                if current_outcome and current_outcome not in ("nan", "None") and current_outcome != api_outcome:
-                    print(f"    [FIX] found wrong outcome {current_outcome}, api correct to {api_outcome}  (slug: {slug})")
-                    total_wrong += 1
-            elif current_outcome and current_outcome not in ("nan", "None"):
-                # Preserve valid pre-expiry outcomes (detected by logger via price/WS)
-                continue
-            else:
-                new_resolved = False
-                new_outcome = ""
+    # 3. Non-expired rows WITH existing outcome: leave as-is (pre-expiry detection)
 
-            old_resolved = current_resolved in ("true", "1")
-            if old_resolved != new_resolved or current_outcome != new_outcome:
-                total_fixed += 1
+    # Count actual changes
+    changed_outcome = (old_outcomes != df.loc[expired_fix, COL_OUTCOME]).sum()
+    total_fixed = int(changed_outcome)
 
-            df.at[idx, COL_RESOLVED] = new_resolved
-            df.at[idx, COL_OUTCOME] = new_outcome
+    # Cleanup temp column
+    df.drop(columns=["_api_outcome"], inplace=True)
 
     print(f"  Rows fixed: {total_fixed:,}")
     print(f"  Wrong outcomes corrected: {total_wrong}")
