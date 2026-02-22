@@ -24,6 +24,14 @@ path = "src/bin/dashboard.rs"
 name = "multi_asset_logger"
 path = "src/bin/multi_asset_logger.rs"
 
+[[bin]]
+name = "debug_resolution"
+path = "src/bin/debug_resolution.rs"
+
+[[bin]]
+name = "fix_csv_outcomes"
+path = "src/bin/fix_csv_outcomes.rs"
+
 # [[bin]]
 # name = "test_binance_bootstrap"
 # path = "src/bin/test_binance_bootstrap.rs"

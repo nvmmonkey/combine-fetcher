@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
@@ -617,6 +617,8 @@ async fn main() -> Result<()> {
     // C6: Gamma API outcome cache (non-blocking resolution detection)
     let gamma_outcome: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let gamma_fetch_in_progress = Arc::new(AtomicBool::new(false));
+    // Generation counter: prevents stale outcome from previous market leaking into new one
+    let gamma_generation = Arc::new(AtomicU64::new(0));
 
     info!("Starting enhanced data collection with hourly rotation...");
 
@@ -726,7 +728,7 @@ async fn main() -> Result<()> {
         let no_spread = calculate_spread_bps(no_bid, no_ask);
 
         // Resolution detection: WS market_resolved → price-based → Gamma API fallback
-        let outcome = if let Some(resolved_event) = market_events.take_resolved() {
+        let outcome = if let Some(resolved_event) = market_events.take_resolved_for(&current_market.slug) {
             // Primary: WS market_resolved event (instant, no HTTP call)
             info!(
                 "✅ WS resolution for {}: {}",
@@ -750,17 +752,23 @@ async fn main() -> Result<()> {
             if let Some(result) = cached {
                 result
             } else if !gamma_fetch_in_progress.load(Ordering::SeqCst) {
-                // Spawn non-blocking Gamma API fetch
+                // Spawn non-blocking Gamma API fetch with generation guard
                 gamma_fetch_in_progress.store(true, Ordering::SeqCst);
                 let cache = gamma_outcome.clone();
                 let in_progress = gamma_fetch_in_progress.clone();
+                let gen = gamma_generation.clone();
+                let gen_at_spawn = gen.load(Ordering::SeqCst);
                 let slug = current_market.slug.clone();
                 let client = http.clone();
                 tokio::spawn(async move {
                     match gamma::fetch_outcome(&client, &slug).await {
                         Ok(result) => {
-                            info!("✅ Gamma API outcome for {}: {}", slug, result);
-                            *cache.lock().unwrap() = Some(result);
+                            if gen.load(Ordering::SeqCst) == gen_at_spawn {
+                                info!("✅ Gamma API outcome for {}: {}", slug, result);
+                                *cache.lock().unwrap() = Some(result);
+                            } else {
+                                info!("Gamma outcome for {} arrived after rotation, discarding", slug);
+                            }
                         }
                         Err(e) => {
                             warn!("Gamma outcome fetch failed for {}: {}", slug, e);
@@ -934,7 +942,7 @@ async fn main() -> Result<()> {
                 );
 
                 // Try WS new_market event first, fall back to Gamma API
-                let next_market_result = match market_events.take_new_market() {
+                let next_market_result = match market_events.take_new_market_for("btc-updown-15m-") {
                     Some(nm) if nm.outcomes.len() == 2 && nm.asset_ids.len() == 2 => {
                         info!("✅ WS new_market: {} (instant, no HTTP)", nm.slug);
                         let next_ws = current_market.window_start + combine_fetcher::MARKET_WINDOW_SECONDS;
@@ -981,6 +989,10 @@ async fn main() -> Result<()> {
                         markets_tracked += 1;
 
                         // Reset Gamma outcome cache for new market
+                        // Increment generation BEFORE clearing — any in-flight
+                        // Gamma fetch from the old market will see a stale generation
+                        // and discard its result.
+                        gamma_generation.fetch_add(1, Ordering::SeqCst);
                         *gamma_outcome.lock().unwrap() = None;
                         gamma_fetch_in_progress.store(false, Ordering::SeqCst);
 

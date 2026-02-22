@@ -13,13 +13,14 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
 use combine_fetcher::api::binance::BinanceDataManager;
 use combine_fetcher::api::gamma;
+use combine_fetcher::api::market_events::MarketEventStream;
 use combine_fetcher::api::polymarket::PolymarketOrderbookStream;
 use combine_fetcher::api::rtds_tracker::{RtdsSnapshot, RtdsTracker};
 use combine_fetcher::api::strike;
@@ -343,6 +344,11 @@ struct MarketState {
     csv_writer: MarketCsvWriter,
     gamma_outcome: Arc<Mutex<Option<String>>>,
     gamma_fetch_in_progress: Arc<AtomicBool>,
+    /// Generation counter: increments on every market rotation.
+    /// Spawned Gamma API tasks capture the current generation and only
+    /// write their result if the generation hasn't changed (prevents stale
+    /// outcome from a previous market leaking into the new one).
+    gamma_generation: Arc<AtomicU64>,
     consecutive_fetch_failures: u32,
     last_fetch_attempt_ms: i64,
     tag: String,
@@ -413,6 +419,7 @@ async fn main() -> Result<()> {
                     csv_writer: MarketCsvWriter::new(base_stem),
                     gamma_outcome: Arc::new(Mutex::new(None)),
                     gamma_fetch_in_progress: Arc::new(AtomicBool::new(false)),
+                    gamma_generation: Arc::new(AtomicU64::new(0)),
                     consecutive_fetch_failures: 0,
                     last_fetch_attempt_ms: 0,
                     tag,
@@ -485,7 +492,7 @@ async fn main() -> Result<()> {
         .flat_map(|ms| vec![ms.market.yes_token_id.clone(), ms.market.no_token_id.clone()])
         .collect();
 
-    let mut rx = poly_stream.clone().stream(all_token_ids).await?;
+    let mut rx = poly_stream.clone().stream(all_token_ids.clone()).await?;
     tokio::spawn(async move {
         while let Some(_update) = rx.recv().await {}
     });
@@ -497,6 +504,11 @@ async fn main() -> Result<()> {
     rtds_tracker.start();
     println!("RTDS tracker connected (BTC only)");
     tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // --- Setup Market Event Stream (WS new_market + market_resolved) ---
+    let market_events = MarketEventStream::new();
+    market_events.start(all_token_ids.clone());
+    println!("Market event stream connected ({} tokens)", all_token_ids.len());
 
     // --- Initialize CSV files ---
     let now = Utc::now();
@@ -616,24 +628,50 @@ async fn main() -> Result<()> {
             let yes_spread = calculate_spread_bps(yes_bid, yes_ask);
             let no_spread = calculate_spread_bps(no_bid, no_ask);
 
-            // Resolution detection (price-based + Gamma API fallback)
-            let outcome = if yes_bid >= 0.99 {
+            // Resolution detection: WS market_resolved → price-based → Gamma API fallback
+            let outcome = if let Some(resolved_event) = market_events.take_resolved_for(&ms.market.slug) {
+                // Primary: WS market_resolved event (instant, no HTTP call)
+                info!(
+                    "[{}] WS resolution: {} -> {}",
+                    ms.tag, resolved_event.slug, resolved_event.winning_outcome
+                );
+                if resolved_event.winning_outcome == "Up" {
+                    "YES".to_string()
+                } else if resolved_event.winning_outcome == "Down" {
+                    "NO".to_string()
+                } else {
+                    resolved_event.winning_outcome
+                }
+            } else if yes_bid >= 0.99 {
                 "YES".to_string()
             } else if no_bid >= 0.99 {
                 "NO".to_string()
             } else if resolved {
+                // Market expired but no WS event and prices not conclusive — Gamma API fallback
                 let cached = ms.gamma_outcome.lock().unwrap().clone();
                 if let Some(result) = cached {
                     result
                 } else if !ms.gamma_fetch_in_progress.load(Ordering::SeqCst) {
+                    // Spawn async Gamma API fetch with generation guard to prevent
+                    // stale results from a previous market leaking into a new one
                     ms.gamma_fetch_in_progress.store(true, Ordering::SeqCst);
                     let cache = ms.gamma_outcome.clone();
                     let in_progress = ms.gamma_fetch_in_progress.clone();
+                    let gen = ms.gamma_generation.clone();
+                    let gen_at_spawn = gen.load(Ordering::SeqCst);
                     let slug = ms.market.slug.clone();
                     let client = http.clone();
                     tokio::spawn(async move {
                         match gamma::fetch_outcome(&client, &slug).await {
-                            Ok(result) => { *cache.lock().unwrap() = Some(result); }
+                            Ok(result) => {
+                                // Only write if generation hasn't changed (no rotation happened)
+                                if gen.load(Ordering::SeqCst) == gen_at_spawn {
+                                    info!("Gamma API outcome for {}: {}", slug, result);
+                                    *cache.lock().unwrap() = Some(result);
+                                } else {
+                                    info!("Gamma API outcome for {} arrived after rotation, discarding", slug);
+                                }
+                            }
                             Err(e) => { warn!("Gamma outcome failed for {}: {}", slug, e); }
                         }
                         in_progress.store(false, Ordering::SeqCst);
@@ -731,7 +769,70 @@ async fn main() -> Result<()> {
                     ms.last_fetch_attempt_ms = now_ms;
                     info!("[{}] Market {} expired (TTX={:.1}m) — rotating...", ms.tag, ms.market.unique_id, ttx);
 
-                    match gamma::fetch_next_market_for(&http, cfg.asset, cfg.timeframe_secs, ms.market.window_start).await {
+                    // --- Priority 2 fix: ensure outcome is captured before rotation ---
+                    // If we still don't have an outcome, do a BLOCKING Gamma API fetch
+                    // (with short timeout) and write a final resolution record to CSV.
+                    if outcome.is_empty() {
+                        info!("[{}] No outcome yet — blocking Gamma fetch before rotation", ms.tag);
+                        let final_outcome = match tokio::time::timeout(
+                            Duration::from_secs(3),
+                            gamma::fetch_outcome(&http, &ms.market.slug),
+                        ).await {
+                            Ok(Ok(result)) => {
+                                info!("[{}] Blocking Gamma outcome: {}", ms.tag, result);
+                                result
+                            }
+                            Ok(Err(e)) => {
+                                warn!("[{}] Blocking Gamma fetch failed: {}", ms.tag, e);
+                                String::new()
+                            }
+                            Err(_) => {
+                                warn!("[{}] Blocking Gamma fetch timed out (3s)", ms.tag);
+                                String::new()
+                            }
+                        };
+                        if !final_outcome.is_empty() {
+                            // Write one final record with the resolution outcome
+                            let mut final_record = record.clone();
+                            final_record.outcome = final_outcome;
+                            ms.csv_writer.write_record(&final_record)?;
+                            info!("[{}] Final resolution record written: {}", ms.tag, final_record.outcome);
+                        }
+                    }
+
+                    // Try WS new_market event first, fall back to Gamma API
+                    let slug_prefix = format!("{}-updown-{}-", cfg.asset, timeframe_label(cfg.timeframe_secs));
+                    let next_market_result = match market_events.take_new_market_for(&slug_prefix) {
+                        Some(nm) if nm.outcomes.len() == 2 && nm.asset_ids.len() == 2 => {
+                            info!("[{}] WS new_market: {} (instant, no HTTP)", ms.tag, nm.slug);
+                            let next_ws = ms.market.window_start + cfg.timeframe_secs;
+                            let up_idx = nm.outcomes.iter().position(|o| o == "Up");
+                            let down_idx = nm.outcomes.iter().position(|o| o == "Down");
+                            let (yes_id, no_id) = match (up_idx, down_idx) {
+                                (Some(ui), Some(di)) => (nm.asset_ids[ui].clone(), nm.asset_ids[di].clone()),
+                                _ => (nm.asset_ids[0].clone(), nm.asset_ids[1].clone()),
+                            };
+                            Ok(gamma::MarketInfo {
+                                unique_id: nm.slug.clone(),
+                                slug: nm.slug,
+                                condition_id: String::new(),
+                                yes_token_id: yes_id,
+                                no_token_id: no_id,
+                                window_start: next_ws,
+                                window_end: next_ws + cfg.timeframe_secs,
+                                strike_price: None,
+                                strike_fetched: false,
+                                asset: cfg.asset.to_string(),
+                                window_seconds: cfg.timeframe_secs,
+                            })
+                        }
+                        _ => {
+                            // No WS event or bad shape — Gamma API fallback
+                            gamma::fetch_next_market_for(&http, cfg.asset, cfg.timeframe_secs, ms.market.window_start).await
+                        }
+                    };
+
+                    match next_market_result {
                         Ok(next_market) => {
                             info!("[{}] Rotated to: {}", ms.tag, next_market.unique_id);
 
@@ -740,6 +841,10 @@ async fn main() -> Result<()> {
                             poly_stream.remove_tokens(&old_tokens);
 
                             ms.market = next_market;
+                            // Increment generation BEFORE clearing — any in-flight
+                            // Gamma fetch from the old market will see a stale generation
+                            // and discard its result instead of writing it here.
+                            ms.gamma_generation.fetch_add(1, Ordering::SeqCst);
                             *ms.gamma_outcome.lock().unwrap() = None;
                             ms.gamma_fetch_in_progress.store(false, Ordering::SeqCst);
                             ms.consecutive_fetch_failures = 0;
