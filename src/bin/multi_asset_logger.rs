@@ -889,15 +889,21 @@ async fn main() -> Result<()> {
         }
 
         // RTDS summary (every 500 ticks)
+        //
+        // NOTE: In multi-asset mode, all assets often show identical stale_ms values.
+        // This is EXPECTED: the RTDS server batches all symbol updates together.
+        // Chainlink feeds share an Ethereum block timestamp; Binance relay batches
+        // all symbols with the same server-assigned timestamp. This is NOT a routing
+        // bug — the per-asset prices below prove each asset receives independent data.
         if tick % 500 == 0 {
             for asset in &["btc", "eth", "sol", "xrp"] {
                 if let Some(rtds) = rtds_per_asset.get(*asset) {
                     let (asset_b, asset_c) = multi_rtds.update_counts(asset);
                     info!(
-                        "[RTDS] {:<3} B_dev={:+.1}bps C_dev={:+.1}bps adv={:.1}bps stale=B:{}ms/C:{}ms n=B:{}/C:{}",
+                        "[RTDS] {:<3} price=B:{:.4}/C:{:.4} dev=B:{:+.1}/C:{:+.1}bps stale=B:{}ms/C:{}ms n=B:{}/C:{}",
                         asset.to_uppercase(),
+                        rtds.rtds_binance_price, rtds.rtds_chainlink_price,
                         rtds.rtds_binance_dev_bps, rtds.rtds_chainlink_dev_bps,
-                        rtds.rtds_price_advantage_bps,
                         rtds.rtds_binance_stale_ms, rtds.rtds_chainlink_stale_ms,
                         asset_b, asset_c,
                     );

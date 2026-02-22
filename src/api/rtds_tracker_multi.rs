@@ -319,6 +319,13 @@ async fn connect_multi_rtds_binance(
 
     let mut stream = Box::pin(stream);
     let mut count: u64 = 0;
+    // Track per-asset first updates to confirm independent routing for each asset.
+    // NOTE: In multi-asset mode, all assets typically share the same source_ts because
+    // the RTDS server batches all symbol updates with a single server-side timestamp.
+    // This is expected server behavior, not a routing bug. The distinct prices per
+    // asset (logged on first update) are the proof that routing works correctly.
+    let mut first_seen: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
 
     while let Some(result) = stream.next().await {
         match result {
@@ -351,11 +358,15 @@ async fn connect_multi_rtds_binance(
                 feed.store(price_f64, source_ts, now_ms);
 
                 count += 1;
-                if count == 1 {
+                if !first_seen.contains(asset) {
                     info!(
-                        "MultiRTDS Binance first update ({}): ${:.2} (source_ts={})",
-                        asset, price_f64, source_ts
+                        "MultiRTDS Binance first {} update: ${:.4} source_ts={} stale={}ms",
+                        asset,
+                        price_f64,
+                        source_ts,
+                        now_ms - source_ts
                     );
+                    first_seen.insert(asset);
                 }
                 if count % 1000 == 0 {
                     debug!(
@@ -388,6 +399,12 @@ async fn connect_multi_rtds_chainlink(
 
     let mut stream = Box::pin(stream);
     let mut count: u64 = 0;
+    // Track per-asset first updates to confirm independent routing.
+    // Chainlink updates all 4 oracle feeds in the same Ethereum block → same block
+    // timestamp for btc/usd, eth/usd, sol/usd, xrp/usd. This causes identical stale_ms
+    // across all Chainlink assets. It is expected server behavior, not a routing bug.
+    let mut first_seen: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
 
     while let Some(result) = stream.next().await {
         match result {
@@ -420,11 +437,15 @@ async fn connect_multi_rtds_chainlink(
                 feed.store(price_f64, source_ts, now_ms);
 
                 count += 1;
-                if count == 1 {
+                if !first_seen.contains(asset) {
                     info!(
-                        "MultiRTDS Chainlink first update ({}): ${:.4} (source_ts={})",
-                        asset, price_f64, source_ts
+                        "MultiRTDS Chainlink first {} update: ${:.4} source_ts={} stale={}ms",
+                        asset,
+                        price_f64,
+                        source_ts,
+                        now_ms - source_ts
                     );
+                    first_seen.insert(asset);
                 }
                 if count % 100 == 0 {
                     debug!(
