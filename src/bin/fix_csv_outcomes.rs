@@ -177,11 +177,13 @@ async fn process_file(
                 );
             }
 
-            // Check if anything actually changed
-            let resolved_matches = current_resolved.eq_ignore_ascii_case(new_resolved);
-            let outcome_matches = current_outcome == new_outcome;
+            // Only count as "fixed" when the outcome meaningfully changed
+            // (ignore resolved="" -> "false" normalization — that's cosmetic)
+            let outcome_changed = current_outcome != new_outcome;
+            let resolved_actually_wrong = !current_resolved.is_empty()
+                && !current_resolved.eq_ignore_ascii_case(new_resolved);
 
-            if !resolved_matches || !outcome_matches {
+            if outcome_changed || resolved_actually_wrong {
                 rows_fixed += 1;
             }
 
