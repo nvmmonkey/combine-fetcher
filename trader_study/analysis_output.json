@@ -1,0 +1,2328 @@
+{
+  "day_stats": {
+    "2026-02-20": {
+      "num_trades": 7842,
+      "num_markets": 34,
+      "num_buys": 6479,
+      "num_sells": 1363,
+      "total_buy_usdc": 130661.47,
+      "total_sell_usdc": 20020.38,
+      "up_buy_usdc": 67833.56,
+      "down_buy_usdc": 62827.91,
+      "avg_usdc_per_market": 3842.98,
+      "first_trade": "2026-02-20T15:40:04.000",
+      "last_trade": "2026-02-20T23:56:38.000"
+    },
+    "2026-02-21": {
+      "num_trades": 6930,
+      "num_markets": 91,
+      "num_buys": 6094,
+      "num_sells": 836,
+      "total_buy_usdc": 50082.98,
+      "total_sell_usdc": 5142.64,
+      "up_buy_usdc": 25851.39,
+      "down_buy_usdc": 24231.58,
+      "avg_usdc_per_market": 550.36,
+      "first_trade": "2026-02-21T00:00:08.000",
+      "last_trade": "2026-02-21T23:54:30.000"
+    },
+    "2026-02-22": {
+      "num_trades": 4833,
+      "num_markets": 75,
+      "num_buys": 4187,
+      "num_sells": 646,
+      "total_buy_usdc": 32946.3,
+      "total_sell_usdc": 4047.48,
+      "up_buy_usdc": 15640.71,
+      "down_buy_usdc": 17305.6,
+      "avg_usdc_per_market": 439.28,
+      "first_trade": "2026-02-22T00:00:40.000",
+      "last_trade": "2026-02-22T19:11:20.000"
+    }
+  },
+  "position_structure": {
+    "2026-02-20": {
+      "type_distribution": {
+        "DOWN_HEAVY": 2,
+        "BOTH_SIDES": 32
+      },
+      "both_sides_count": 32,
+      "up_only_count": 0,
+      "down_only_count": 0,
+      "ratio_up_down_avg": 1.1498,
+      "ratio_up_down_median": 0.989
+    },
+    "2026-02-21": {
+      "type_distribution": {
+        "BOTH_SIDES": 79,
+        "DOWN_HEAVY": 4,
+        "UP_ONLY": 2,
+        "UP_HEAVY": 5,
+        "DOWN_ONLY": 1
+      },
+      "both_sides_count": 79,
+      "up_only_count": 2,
+      "down_only_count": 1,
+      "ratio_up_down_avg": 1.2438,
+      "ratio_up_down_median": 1.1215
+    },
+    "2026-02-22": {
+      "type_distribution": {
+        "BOTH_SIDES": 69,
+        "DOWN_ONLY": 1,
+        "UP_ONLY": 2,
+        "DOWN_HEAVY": 2,
+        "UP_HEAVY": 1
+      },
+      "both_sides_count": 69,
+      "up_only_count": 2,
+      "down_only_count": 1,
+      "ratio_up_down_avg": 1.1579,
+      "ratio_up_down_median": 0.9945
+    }
+  },
+  "entry_timing": {
+    "2026-02-20": {
+      "avg_first_entry_s": 38.2,
+      "median_first_entry_s": 10.0,
+      "min_first_entry_s": 4,
+      "max_first_entry_s": 604,
+      "pct_entering_within_60s": 91.2,
+      "pct_entering_within_120s": 94.1,
+      "pct_entering_after_5min": 2.9,
+      "all_trades_avg_delay_s": 295.6
+    },
+    "2026-02-21": {
+      "avg_first_entry_s": 23.6,
+      "median_first_entry_s": 8,
+      "min_first_entry_s": 4,
+      "max_first_entry_s": 182,
+      "pct_entering_within_60s": 87.9,
+      "pct_entering_within_120s": 97.8,
+      "pct_entering_after_5min": 0.0,
+      "all_trades_avg_delay_s": 308.3
+    },
+    "2026-02-22": {
+      "avg_first_entry_s": 37.8,
+      "median_first_entry_s": 12,
+      "min_first_entry_s": 4,
+      "max_first_entry_s": 222,
+      "pct_entering_within_60s": 78.7,
+      "pct_entering_within_120s": 92.0,
+      "pct_entering_after_5min": 0.0,
+      "all_trades_avg_delay_s": 327.7
+    }
+  },
+  "price_analysis": {
+    "2026-02-20": {
+      "up_price_avg": 0.4822,
+      "up_price_median": 0.49,
+      "down_price_avg": 0.42,
+      "down_price_median": 0.42,
+      "overall_price_avg": 0.4452,
+      "price_buckets_count": {
+        "<0.05": 39,
+        "0.05-0.10": 136,
+        "0.10-0.20": 332,
+        "0.20-0.40": 1831,
+        "0.40-0.60": 2981,
+        "0.60-0.80": 1022,
+        "0.80-0.95": 137,
+        ">0.95": 1
+      },
+      "price_buckets_usdc": {
+        "<0.05": 70.92,
+        "0.05-0.10": 344.69,
+        "0.10-0.20": 1889.37,
+        "0.20-0.40": 19686.72,
+        "0.40-0.60": 59266.76,
+        "0.60-0.80": 40935.03,
+        "0.80-0.95": 8456.59,
+        ">0.95": 11.4
+      }
+    },
+    "2026-02-21": {
+      "up_price_avg": 0.4235,
+      "up_price_median": 0.44,
+      "down_price_avg": 0.4313,
+      "down_price_median": 0.43,
+      "overall_price_avg": 0.4273,
+      "price_buckets_count": {
+        "<0.05": 58,
+        "0.05-0.10": 88,
+        "0.10-0.20": 363,
+        "0.20-0.40": 1897,
+        "0.40-0.60": 2834,
+        "0.60-0.80": 761,
+        "0.80-0.95": 93
+      },
+      "price_buckets_usdc": {
+        "<0.05": 35.59,
+        "0.05-0.10": 123.51,
+        "0.10-0.20": 999.94,
+        "0.20-0.40": 10303.54,
+        "0.40-0.60": 25730.23,
+        "0.60-0.80": 10973.88,
+        "0.80-0.95": 1916.27
+      }
+    },
+    "2026-02-22": {
+      "up_price_avg": 0.4328,
+      "up_price_median": 0.45,
+      "down_price_avg": 0.4346,
+      "down_price_median": 0.45,
+      "overall_price_avg": 0.4338,
+      "price_buckets_count": {
+        "<0.05": 26,
+        "0.05-0.10": 72,
+        "0.10-0.20": 266,
+        "0.20-0.40": 1188,
+        "0.40-0.60": 2058,
+        "0.60-0.80": 503,
+        "0.80-0.95": 74
+      },
+      "price_buckets_usdc": {
+        "<0.05": 22.72,
+        "0.05-0.10": 112.89,
+        "0.10-0.20": 787.09,
+        "0.20-0.40": 6043.07,
+        "0.40-0.60": 17999.27,
+        "0.60-0.80": 6688.2,
+        "0.80-0.95": 1293.05
+      }
+    }
+  },
+  "position_sizing": {
+    "2026-02-20": {
+      "avg_usdc_per_market": 3842.98,
+      "median_usdc_per_market": 2688.57,
+      "min_usdc_per_market": 512.62,
+      "max_usdc_per_market": 16557.94,
+      "stdev_usdc_per_market": 3581.25,
+      "total_deployed": 130661.47,
+      "markets_over_500": 34,
+      "markets_over_1000": 28,
+      "markets_under_100": 0
+    },
+    "2026-02-21": {
+      "avg_usdc_per_market": 550.36,
+      "median_usdc_per_market": 421.98,
+      "min_usdc_per_market": 51.3,
+      "max_usdc_per_market": 2763.68,
+      "stdev_usdc_per_market": 429.38,
+      "total_deployed": 50082.98,
+      "markets_over_500": 37,
+      "markets_over_1000": 9,
+      "markets_under_100": 3
+    },
+    "2026-02-22": {
+      "avg_usdc_per_market": 439.28,
+      "median_usdc_per_market": 366.38,
+      "min_usdc_per_market": 24.32,
+      "max_usdc_per_market": 1735.33,
+      "stdev_usdc_per_market": 279.67,
+      "total_deployed": 32946.3,
+      "markets_over_500": 23,
+      "markets_over_1000": 2,
+      "markets_under_100": 4
+    }
+  },
+  "sell_behavior": {
+    "2026-02-20": {
+      "num_sells": 1363,
+      "num_buys": 6479,
+      "sell_to_buy_ratio": 0.2104,
+      "total_sell_usdc": 20020.38,
+      "avg_sell_price": 0.3812,
+      "sell_outcome_breakdown": {
+        "Down": 762,
+        "Up": 601
+      },
+      "sell_price_range": "0.1600 - 0.5200"
+    },
+    "2026-02-21": {
+      "num_sells": 836,
+      "num_buys": 6094,
+      "sell_to_buy_ratio": 0.1372,
+      "total_sell_usdc": 5142.64,
+      "avg_sell_price": 0.3589,
+      "sell_outcome_breakdown": {
+        "Up": 424,
+        "Down": 412
+      },
+      "sell_price_range": "0.1000 - 0.5000"
+    },
+    "2026-02-22": {
+      "num_sells": 646,
+      "num_buys": 4187,
+      "sell_to_buy_ratio": 0.1543,
+      "total_sell_usdc": 4047.48,
+      "avg_sell_price": 0.3702,
+      "sell_outcome_breakdown": {
+        "Down": 318,
+        "Up": 328
+      },
+      "sell_price_range": "0.1000 - 0.5500"
+    }
+  },
+  "pnl_analysis": {
+    "2026-02-20": {
+      "num_markets": 34,
+      "guaranteed_profits": 4,
+      "guaranteed_losses": 9,
+      "total_min_pnl": -22430.23,
+      "total_max_pnl": 21473.75,
+      "avg_combined_avg": 0.5312,
+      "median_combined_avg": 0.5217,
+      "worst_5_markets": [
+        [
+          "18:30",
+          "Bitcoin Up or Down - February 20, 1:30PM-1:45PM ET",
+          -2474.24,
+          -322.35,
+          0.862
+        ],
+        [
+          "23:00",
+          "Bitcoin Up or Down - February 20, 6:00PM-6:15PM ET",
+          -2364.65,
+          450.5,
+          0.682
+        ],
+        [
+          "18:00",
+          "Bitcoin Up or Down - February 20, 1:00PM-1:15PM ET",
+          -2051.69,
+          671.87,
+          0.6411
+        ],
+        [
+          "16:15",
+          "Bitcoin Up or Down - February 20, 11:15AM-11:30AM ",
+          -1518.68,
+          1197.41,
+          0.6424
+        ],
+        [
+          "18:45",
+          "Bitcoin Up or Down - February 20, 1:45PM-2:00PM ET",
+          -1430.62,
+          961.68,
+          0.6239
+        ]
+      ],
+      "best_5_markets": [
+        [
+          "16:30",
+          "Bitcoin Up or Down - February 20, 11:30AM-11:45AM ",
+          -103.6,
+          1486.61,
+          0.2764
+        ],
+        [
+          "19:15",
+          "Bitcoin Up or Down - February 20, 2:15PM-2:30PM ET",
+          3.48,
+          31.34,
+          0.4915
+        ],
+        [
+          "15:30",
+          "Bitcoin Up or Down - February 20, 10:30AM-10:45AM ",
+          24.89,
+          667.38,
+          0.343
+        ],
+        [
+          "16:45",
+          "Bitcoin Up or Down - February 20, 11:45AM-12:00PM ",
+          85.65,
+          938.06,
+          0.2903
+        ],
+        [
+          "19:30",
+          "Bitcoin Up or Down - February 20, 2:30PM-2:45PM ET",
+          134.01,
+          219.84,
+          0.4096
+        ]
+      ]
+    },
+    "2026-02-21": {
+      "num_markets": 91,
+      "guaranteed_profits": 13,
+      "guaranteed_losses": 5,
+      "total_min_pnl": -9681.6,
+      "total_max_pnl": 19514.74,
+      "avg_combined_avg": 0.5094,
+      "median_combined_avg": 0.4896,
+      "worst_5_markets": [
+        [
+          "01:45",
+          "Bitcoin Up or Down - February 20, 8:45PM-9:00PM ET",
+          -1500.51,
+          1456.96,
+          0.5074
+        ],
+        [
+          "20:45",
+          "Bitcoin Up or Down - February 21, 3:45PM-4:00PM ET",
+          -610.34,
+          657.07,
+          0.5303
+        ],
+        [
+          "12:00",
+          "Bitcoin Up or Down - February 21, 7:00AM-7:15AM ET",
+          -505.62,
+          517.06,
+          0.5458
+        ],
+        [
+          "12:30",
+          "Bitcoin Up or Down - February 21, 7:30AM-7:45AM ET",
+          -421.98,
+          616.15,
+          0.4065
+        ],
+        [
+          "00:30",
+          "Bitcoin Up or Down - February 20, 7:30PM-7:45PM ET",
+          -388.64,
+          840.13,
+          0.5245
+        ]
+      ],
+      "best_5_markets": [
+        [
+          "10:00",
+          "Bitcoin Up or Down - February 21, 5:00AM-5:15AM ET",
+          50.53,
+          176.86,
+          0.3186
+        ],
+        [
+          "00:00",
+          "Bitcoin Up or Down - February 20, 7:00PM-7:15PM ET",
+          56.88,
+          870.01,
+          0.4131
+        ],
+        [
+          "18:15",
+          "Bitcoin Up or Down - February 21, 1:15PM-1:30PM ET",
+          89.13,
+          188.32,
+          0.4401
+        ],
+        [
+          "09:15",
+          "Bitcoin Up or Down - February 21, 4:15AM-4:30AM ET",
+          141.3,
+          220.58,
+          0.2833
+        ],
+        [
+          "14:30",
+          "Bitcoin Up or Down - February 21, 9:30AM-9:45AM ET",
+          418.28,
+          552.22,
+          0.3648
+        ]
+      ]
+    },
+    "2026-02-22": {
+      "num_markets": 75,
+      "guaranteed_profits": 18,
+      "guaranteed_losses": 4,
+      "total_min_pnl": -5062.64,
+      "total_max_pnl": 11811.71,
+      "avg_combined_avg": 0.5224,
+      "median_combined_avg": 0.4775,
+      "worst_5_markets": [
+        [
+          "17:30",
+          "Bitcoin Up or Down - February 22, 12:30PM-12:45PM ",
+          -664.26,
+          183.07,
+          0.704
+        ],
+        [
+          "14:45",
+          "Bitcoin Up or Down - February 22, 9:45AM-10:00AM E",
+          -494.23,
+          201.37,
+          0.8472
+        ],
+        [
+          "15:15",
+          "Bitcoin Up or Down - February 22, 10:15AM-10:30AM ",
+          -411.68,
+          495.02,
+          0.4775
+        ],
+        [
+          "13:45",
+          "Bitcoin Up or Down - February 22, 8:45AM-9:00AM ET",
+          -389.98,
+          634.84,
+          0.5702
+        ],
+        [
+          "14:30",
+          "Bitcoin Up or Down - February 22, 9:30AM-9:45AM ET",
+          -287.89,
+          278.22,
+          0.676
+        ]
+      ],
+      "best_5_markets": [
+        [
+          "01:15",
+          "Bitcoin Up or Down - February 21, 8:15PM-8:30PM ET",
+          60.69,
+          97.65,
+          0.4086
+        ],
+        [
+          "16:00",
+          "Bitcoin Up or Down - February 22, 11:00AM-11:15AM ",
+          69.87,
+          335.12,
+          0.3117
+        ],
+        [
+          "17:00",
+          "Bitcoin Up or Down - February 22, 12:00PM-12:15PM ",
+          82.88,
+          158.19,
+          0.6541
+        ],
+        [
+          "10:45",
+          "Bitcoin Up or Down - February 22, 5:45AM-6:00AM ET",
+          113.24,
+          192.7,
+          0.3589
+        ],
+        [
+          "11:00",
+          "Bitcoin Up or Down - February 22, 6:00AM-6:15AM ET",
+          128.56,
+          298.81,
+          0.3981
+        ]
+      ]
+    }
+  },
+  "gap_analysis": {
+    "2026-02-20": {
+      "num_gaps_20min": 0,
+      "gaps": [],
+      "trading_window": "15:40 - 23:56 UTC"
+    },
+    "2026-02-21": {
+      "num_gaps_20min": 2,
+      "gaps": [
+        {
+          "gap_start": "2026-02-21 02:09:30 UTC",
+          "gap_end": "2026-02-21 03:00:08 UTC",
+          "gap_minutes": 50.63333333333333,
+          "gap_start_ts": 1771639770,
+          "gap_end_ts": 1771642808
+        },
+        {
+          "gap_start": "2026-02-21 04:41:42 UTC",
+          "gap_end": "2026-02-21 05:15:16 UTC",
+          "gap_minutes": 33.56666666666667,
+          "gap_start_ts": 1771648902,
+          "gap_end_ts": 1771650916
+        }
+      ],
+      "trading_window": "00:00 - 23:54 UTC"
+    },
+    "2026-02-22": {
+      "num_gaps_20min": 1,
+      "gaps": [
+        {
+          "gap_start": "2026-02-22 04:41:42 UTC",
+          "gap_end": "2026-02-22 05:15:06 UTC",
+          "gap_minutes": 33.4,
+          "gap_start_ts": 1771735302,
+          "gap_end_ts": 1771737306
+        }
+      ],
+      "trading_window": "00:00 - 19:11 UTC"
+    }
+  },
+  "feb21_hourly": [
+    {
+      "hour": "00:00",
+      "trades": 869,
+      "buy_usdc": 7948.76,
+      "sell_usdc": 848.36,
+      "markets": 4
+    },
+    {
+      "hour": "01:00",
+      "trades": 150,
+      "buy_usdc": 2747.9,
+      "sell_usdc": 38.36,
+      "markets": 4
+    },
+    {
+      "hour": "02:00",
+      "trades": 64,
+      "buy_usdc": 786.81,
+      "sell_usdc": 127.3,
+      "markets": 1
+    },
+    {
+      "hour": "03:00",
+      "trades": 151,
+      "buy_usdc": 1209.3,
+      "sell_usdc": 59.65,
+      "markets": 4
+    },
+    {
+      "hour": "04:00",
+      "trades": 235,
+      "buy_usdc": 1714.69,
+      "sell_usdc": 137.71,
+      "markets": 3
+    },
+    {
+      "hour": "05:00",
+      "trades": 263,
+      "buy_usdc": 1591.13,
+      "sell_usdc": 291.52,
+      "markets": 3
+    },
+    {
+      "hour": "06:00",
+      "trades": 266,
+      "buy_usdc": 1347.22,
+      "sell_usdc": 260.52,
+      "markets": 4
+    },
+    {
+      "hour": "07:00",
+      "trades": 431,
+      "buy_usdc": 1819.18,
+      "sell_usdc": 340.86,
+      "markets": 4
+    },
+    {
+      "hour": "08:00",
+      "trades": 517,
+      "buy_usdc": 2521.53,
+      "sell_usdc": 498.09,
+      "markets": 4
+    },
+    {
+      "hour": "09:00",
+      "trades": 354,
+      "buy_usdc": 2172.21,
+      "sell_usdc": 521.1,
+      "markets": 4
+    },
+    {
+      "hour": "10:00",
+      "trades": 249,
+      "buy_usdc": 1543.17,
+      "sell_usdc": 71.31,
+      "markets": 4
+    },
+    {
+      "hour": "11:00",
+      "trades": 284,
+      "buy_usdc": 1304.17,
+      "sell_usdc": 99.67,
+      "markets": 4
+    },
+    {
+      "hour": "12:00",
+      "trades": 287,
+      "buy_usdc": 2146.06,
+      "sell_usdc": 205.33,
+      "markets": 4
+    },
+    {
+      "hour": "13:00",
+      "trades": 183,
+      "buy_usdc": 1217.92,
+      "sell_usdc": 6.21,
+      "markets": 4
+    },
+    {
+      "hour": "14:00",
+      "trades": 361,
+      "buy_usdc": 3144.26,
+      "sell_usdc": 204.59,
+      "markets": 4
+    },
+    {
+      "hour": "15:00",
+      "trades": 355,
+      "buy_usdc": 2799.76,
+      "sell_usdc": 374.1,
+      "markets": 4
+    },
+    {
+      "hour": "16:00",
+      "trades": 222,
+      "buy_usdc": 2115.69,
+      "sell_usdc": 15.9,
+      "markets": 4
+    },
+    {
+      "hour": "17:00",
+      "trades": 183,
+      "buy_usdc": 1684.53,
+      "sell_usdc": 178.13,
+      "markets": 4
+    },
+    {
+      "hour": "18:00",
+      "trades": 430,
+      "buy_usdc": 3194.3,
+      "sell_usdc": 386.2,
+      "markets": 4
+    },
+    {
+      "hour": "19:00",
+      "trades": 183,
+      "buy_usdc": 1143.58,
+      "sell_usdc": 107.73,
+      "markets": 4
+    },
+    {
+      "hour": "20:00",
+      "trades": 291,
+      "buy_usdc": 1808.89,
+      "sell_usdc": 103.05,
+      "markets": 4
+    },
+    {
+      "hour": "21:00",
+      "trades": 199,
+      "buy_usdc": 1413.35,
+      "sell_usdc": 74.07,
+      "markets": 4
+    },
+    {
+      "hour": "22:00",
+      "trades": 236,
+      "buy_usdc": 1500.73,
+      "sell_usdc": 158.78,
+      "markets": 4
+    },
+    {
+      "hour": "23:00",
+      "trades": 167,
+      "buy_usdc": 1207.84,
+      "sell_usdc": 34.11,
+      "markets": 4
+    }
+  ],
+  "dn_analysis": {
+    "2026-02-20": {
+      "dn_guaranteed_profit": 4,
+      "directional_only": 0,
+      "both_sides_not_guaranteed": 30,
+      "total_markets": 34,
+      "dn_pct": 11.8,
+      "sample_dn_markets": [
+        {
+          "market_start": "15:30",
+          "avg_up_price": 0.0348,
+          "avg_down_price": 0.9,
+          "combined_avg": 0.343,
+          "guaranteed_min_pnl": 24.89
+        },
+        {
+          "market_start": "16:45",
+          "avg_up_price": 0.6225,
+          "avg_down_price": 0.1769,
+          "combined_avg": 0.2903,
+          "guaranteed_min_pnl": 85.65
+        },
+        {
+          "market_start": "19:15",
+          "avg_up_price": 0.5371,
+          "avg_down_price": 0.3835,
+          "combined_avg": 0.4915,
+          "guaranteed_min_pnl": 3.48
+        },
+        {
+          "market_start": "19:30",
+          "avg_up_price": 0.6439,
+          "avg_down_price": 0.1442,
+          "combined_avg": 0.4096,
+          "guaranteed_min_pnl": 134.01
+        }
+      ]
+    },
+    "2026-02-21": {
+      "dn_guaranteed_profit": 13,
+      "directional_only": 3,
+      "both_sides_not_guaranteed": 75,
+      "total_markets": 91,
+      "dn_pct": 14.3,
+      "sample_dn_markets": [
+        {
+          "market_start": "00:00",
+          "avg_up_price": 0.3034,
+          "avg_down_price": 0.4511,
+          "combined_avg": 0.4131,
+          "guaranteed_min_pnl": 56.88
+        },
+        {
+          "market_start": "08:00",
+          "avg_up_price": 0.4568,
+          "avg_down_price": 0.482,
+          "combined_avg": 0.596,
+          "guaranteed_min_pnl": 1.28
+        },
+        {
+          "market_start": "08:15",
+          "avg_up_price": 0.5754,
+          "avg_down_price": 0.3297,
+          "combined_avg": 0.5152,
+          "guaranteed_min_pnl": 7.61
+        },
+        {
+          "market_start": "09:15",
+          "avg_up_price": 0.5564,
+          "avg_down_price": 0.0604,
+          "combined_avg": 0.2833,
+          "guaranteed_min_pnl": 141.3
+        },
+        {
+          "market_start": "10:00",
+          "avg_up_price": 0.6815,
+          "avg_down_price": 0.0852,
+          "combined_avg": 0.3186,
+          "guaranteed_min_pnl": 50.53
+        },
+        {
+          "market_start": "11:00",
+          "avg_up_price": 0.5069,
+          "avg_down_price": 0.3467,
+          "combined_avg": 0.4833,
+          "guaranteed_min_pnl": 2.55
+        },
+        {
+          "market_start": "11:15",
+          "avg_up_price": 0.4344,
+          "avg_down_price": 0.5279,
+          "combined_avg": 0.4731,
+          "guaranteed_min_pnl": 8.16
+        },
+        {
+          "market_start": "13:15",
+          "avg_up_price": 0.4532,
+          "avg_down_price": 0.3709,
+          "combined_avg": 0.4214,
+          "guaranteed_min_pnl": 10.31
+        },
+        {
+          "market_start": "14:30",
+          "avg_up_price": 0.4494,
+          "avg_down_price": 0.2796,
+          "combined_avg": 0.3648,
+          "guaranteed_min_pnl": 418.28
+        },
+        {
+          "market_start": "14:45",
+          "avg_up_price": 0.3506,
+          "avg_down_price": 0.5573,
+          "combined_avg": 0.5392,
+          "guaranteed_min_pnl": 15.6
+        }
+      ]
+    },
+    "2026-02-22": {
+      "dn_guaranteed_profit": 17,
+      "directional_only": 3,
+      "both_sides_not_guaranteed": 55,
+      "total_markets": 75,
+      "dn_pct": 22.7,
+      "sample_dn_markets": [
+        {
+          "market_start": "01:00",
+          "avg_up_price": 0.5473,
+          "avg_down_price": 0.2325,
+          "combined_avg": 0.3182,
+          "guaranteed_min_pnl": 35.01
+        },
+        {
+          "market_start": "01:15",
+          "avg_up_price": 0.5291,
+          "avg_down_price": 0.2818,
+          "combined_avg": 0.4086,
+          "guaranteed_min_pnl": 60.69
+        },
+        {
+          "market_start": "03:45",
+          "avg_up_price": 0.4851,
+          "avg_down_price": 0.4076,
+          "combined_avg": 0.6889,
+          "guaranteed_min_pnl": 20.47
+        },
+        {
+          "market_start": "04:00",
+          "avg_up_price": 0.5264,
+          "avg_down_price": 0.456,
+          "combined_avg": 0.4878,
+          "guaranteed_min_pnl": 7.6
+        },
+        {
+          "market_start": "05:45",
+          "avg_up_price": 0.3039,
+          "avg_down_price": 0.609,
+          "combined_avg": 0.4683,
+          "guaranteed_min_pnl": 29.42
+        },
+        {
+          "market_start": "08:15",
+          "avg_up_price": 0.2925,
+          "avg_down_price": 0.3916,
+          "combined_avg": 0.3788,
+          "guaranteed_min_pnl": 17.27
+        },
+        {
+          "market_start": "10:45",
+          "avg_up_price": 0.5654,
+          "avg_down_price": 0.2356,
+          "combined_avg": 0.3589,
+          "guaranteed_min_pnl": 113.24
+        },
+        {
+          "market_start": "11:00",
+          "avg_up_price": 0.5782,
+          "avg_down_price": 0.2047,
+          "combined_avg": 0.3981,
+          "guaranteed_min_pnl": 128.56
+        },
+        {
+          "market_start": "13:15",
+          "avg_up_price": 0.33,
+          "avg_down_price": 0.3865,
+          "combined_avg": 0.3879,
+          "guaranteed_min_pnl": 10.33
+        },
+        {
+          "market_start": "14:00",
+          "avg_up_price": 0.3382,
+          "avg_down_price": 0.7054,
+          "combined_avg": 0.4699,
+          "guaranteed_min_pnl": 22.86
+        }
+      ]
+    }
+  },
+  "feb21_market_timeline": [
+    {
+      "market_start": "00:00",
+      "title": "Bitcoin Up or Down - February 20, 7:00PM-7:15PM ET",
+      "num_trades": 196,
+      "total_cost": 1572.64,
+      "combined_avg": 0.4131,
+      "pnl_if_up": 870.01,
+      "pnl_if_down": 56.88,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 767.02,
+      "down_buy_usdc": 805.63,
+      "sells_usdc": 132.51
+    },
+    {
+      "market_start": "00:15",
+      "title": "Bitcoin Up or Down - February 20, 7:15PM-7:30PM ET",
+      "num_trades": 139,
+      "total_cost": 1443.24,
+      "combined_avg": 0.4837,
+      "pnl_if_up": -9.54,
+      "pnl_if_down": 118.72,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 20,
+      "up_buy_usdc": 375.73,
+      "down_buy_usdc": 1067.52,
+      "sells_usdc": 5.89
+    },
+    {
+      "market_start": "00:30",
+      "title": "Bitcoin Up or Down - February 20, 7:30PM-7:45PM ET",
+      "num_trades": 208,
+      "total_cost": 2169.19,
+      "combined_avg": 0.5245,
+      "pnl_if_up": 840.13,
+      "pnl_if_down": -388.64,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 1024.8,
+      "down_buy_usdc": 1144.39,
+      "sells_usdc": 326.99
+    },
+    {
+      "market_start": "00:45",
+      "title": "Bitcoin Up or Down - February 20, 7:45PM-8:00PM ET",
+      "num_trades": 326,
+      "total_cost": 2763.68,
+      "combined_avg": 0.5473,
+      "pnl_if_up": 371.64,
+      "pnl_if_down": -83.55,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 32,
+      "up_buy_usdc": 1252.54,
+      "down_buy_usdc": 1511.14,
+      "sells_usdc": 382.97
+    },
+    {
+      "market_start": "01:00",
+      "title": "Bitcoin Up or Down - February 20, 8:00PM-8:15PM ET",
+      "num_trades": 73,
+      "total_cost": 660.16,
+      "combined_avg": 0.4618,
+      "pnl_if_up": -127.06,
+      "pnl_if_down": 312.84,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 38,
+      "up_buy_usdc": 344.57,
+      "down_buy_usdc": 315.59,
+      "sells_usdc": 38.36
+    },
+    {
+      "market_start": "01:15",
+      "title": "Bitcoin Up or Down - February 20, 8:15PM-8:30PM ET",
+      "num_trades": 16,
+      "total_cost": 321.48,
+      "combined_avg": 0.4763,
+      "pnl_if_up": -148.71,
+      "pnl_if_down": 180.73,
+      "guaranteed": false,
+      "pos_type": "DOWN_HEAVY",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 33.65,
+      "down_buy_usdc": 287.83,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "01:30",
+      "title": "Bitcoin Up or Down - February 20, 8:30PM-8:45PM ET",
+      "num_trades": 22,
+      "total_cost": 265.76,
+      "combined_avg": 0.4499,
+      "pnl_if_up": -12.86,
+      "pnl_if_down": 72.01,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 54,
+      "up_buy_usdc": 152.57,
+      "down_buy_usdc": 113.19,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "01:45",
+      "title": "Bitcoin Up or Down - February 20, 8:45PM-9:00PM ET",
+      "num_trades": 39,
+      "total_cost": 1500.51,
+      "combined_avg": 0.5074,
+      "pnl_if_up": 1456.96,
+      "pnl_if_down": -1500.51,
+      "guaranteed": false,
+      "pos_type": "UP_ONLY",
+      "first_entry_delay": 20,
+      "up_buy_usdc": 1500.51,
+      "down_buy_usdc": 0,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "02:00",
+      "title": "Bitcoin Up or Down - February 20, 9:00PM-9:15PM ET",
+      "num_trades": 64,
+      "total_cost": 786.81,
+      "combined_avg": 0.6156,
+      "pnl_if_up": 274.62,
+      "pnl_if_down": -315.48,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 419.87,
+      "down_buy_usdc": 366.95,
+      "sells_usdc": 127.3
+    },
+    {
+      "market_start": "03:00",
+      "title": "Bitcoin Up or Down - February 20, 10:00PM-10:15PM ET",
+      "num_trades": 44,
+      "total_cost": 341.88,
+      "combined_avg": 0.4384,
+      "pnl_if_up": 98.4,
+      "pnl_if_down": -2.36,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 65.47,
+      "down_buy_usdc": 276.41,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "03:15",
+      "title": "Bitcoin Up or Down - February 20, 10:15PM-10:30PM ET",
+      "num_trades": 46,
+      "total_cost": 352.32,
+      "combined_avg": 0.5057,
+      "pnl_if_up": -120.65,
+      "pnl_if_down": 207.27,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 111.65,
+      "down_buy_usdc": 240.68,
+      "sells_usdc": 47.26
+    },
+    {
+      "market_start": "03:30",
+      "title": "Bitcoin Up or Down - February 20, 10:30PM-10:45PM ET",
+      "num_trades": 25,
+      "total_cost": 208.37,
+      "combined_avg": 0.568,
+      "pnl_if_up": 1.17,
+      "pnl_if_down": -51.03,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 111.06,
+      "down_buy_usdc": 97.31,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "03:45",
+      "title": "Bitcoin Up or Down - February 20, 10:45PM-11:00PM ET",
+      "num_trades": 36,
+      "total_cost": 306.72,
+      "combined_avg": 0.4983,
+      "pnl_if_up": -9.71,
+      "pnl_if_down": 36.64,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 182,
+      "up_buy_usdc": 180.02,
+      "down_buy_usdc": 126.7,
+      "sells_usdc": 12.39
+    },
+    {
+      "market_start": "04:00",
+      "title": "Bitcoin Up or Down - February 20, 11:00PM-11:15PM ET",
+      "num_trades": 96,
+      "total_cost": 753.17,
+      "combined_avg": 0.4295,
+      "pnl_if_up": -372.62,
+      "pnl_if_down": 619.79,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 64,
+      "up_buy_usdc": 157.17,
+      "down_buy_usdc": 596.0,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "04:15",
+      "title": "Bitcoin Up or Down - February 20, 11:15PM-11:30PM ET",
+      "num_trades": 69,
+      "total_cost": 560.62,
+      "combined_avg": 0.5509,
+      "pnl_if_up": -37.28,
+      "pnl_if_down": 10.84,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 255.04,
+      "down_buy_usdc": 305.58,
+      "sells_usdc": 38.62
+    },
+    {
+      "market_start": "04:30",
+      "title": "Bitcoin Up or Down - February 20, 11:30PM-11:45PM ET",
+      "num_trades": 70,
+      "total_cost": 400.9,
+      "combined_avg": 0.6734,
+      "pnl_if_up": -32.25,
+      "pnl_if_down": 23.96,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 76,
+      "up_buy_usdc": 244.47,
+      "down_buy_usdc": 156.44,
+      "sells_usdc": 99.09
+    },
+    {
+      "market_start": "05:15",
+      "title": "Bitcoin Up or Down - February 21, 12:15AM-12:30AM ET",
+      "num_trades": 109,
+      "total_cost": 619.71,
+      "combined_avg": 0.6949,
+      "pnl_if_up": 100.79,
+      "pnl_if_down": -103.24,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 16,
+      "up_buy_usdc": 358.31,
+      "down_buy_usdc": 261.4,
+      "sells_usdc": 172.56
+    },
+    {
+      "market_start": "05:30",
+      "title": "Bitcoin Up or Down - February 21, 12:30AM-12:45AM ET",
+      "num_trades": 108,
+      "total_cost": 668.7,
+      "combined_avg": 0.6344,
+      "pnl_if_up": 116.52,
+      "pnl_if_down": -218.0,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 426.33,
+      "down_buy_usdc": 242.37,
+      "sells_usdc": 90.96
+    },
+    {
+      "market_start": "05:45",
+      "title": "Bitcoin Up or Down - February 21, 12:45AM-1:00AM ET",
+      "num_trades": 46,
+      "total_cost": 302.72,
+      "combined_avg": 0.5877,
+      "pnl_if_up": 68.02,
+      "pnl_if_down": -102.41,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 178.14,
+      "down_buy_usdc": 124.58,
+      "sells_usdc": 28.0
+    },
+    {
+      "market_start": "06:00",
+      "title": "Bitcoin Up or Down - February 21, 1:00AM-1:15AM ET",
+      "num_trades": 107,
+      "total_cost": 555.34,
+      "combined_avg": 0.5686,
+      "pnl_if_up": 6.64,
+      "pnl_if_down": -14.11,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 303.8,
+      "down_buy_usdc": 251.54,
+      "sells_usdc": 63.24
+    },
+    {
+      "market_start": "06:15",
+      "title": "Bitcoin Up or Down - February 21, 1:15AM-1:30AM ET",
+      "num_trades": 34,
+      "total_cost": 235.05,
+      "combined_avg": 0.5729,
+      "pnl_if_up": -74.84,
+      "pnl_if_down": 14.99,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 64.38,
+      "down_buy_usdc": 170.67,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "06:30",
+      "title": "Bitcoin Up or Down - February 21, 1:30AM-1:45AM ET",
+      "num_trades": 30,
+      "total_cost": 181.06,
+      "combined_avg": 0.4828,
+      "pnl_if_up": -30.28,
+      "pnl_if_down": 43.17,
+      "guaranteed": false,
+      "pos_type": "DOWN_HEAVY",
+      "first_entry_delay": 18,
+      "up_buy_usdc": 21.86,
+      "down_buy_usdc": 159.21,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "06:45",
+      "title": "Bitcoin Up or Down - February 21, 1:45AM-2:00AM ET",
+      "num_trades": 95,
+      "total_cost": 375.76,
+      "combined_avg": 1.388,
+      "pnl_if_up": -19.19,
+      "pnl_if_down": -67.06,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 150.64,
+      "down_buy_usdc": 225.12,
+      "sells_usdc": 197.28
+    },
+    {
+      "market_start": "07:00",
+      "title": "Bitcoin Up or Down - February 21, 2:00AM-2:15AM ET",
+      "num_trades": 60,
+      "total_cost": 281.06,
+      "combined_avg": 0.5135,
+      "pnl_if_up": 124.64,
+      "pnl_if_down": -38.03,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 46,
+      "up_buy_usdc": 139.74,
+      "down_buy_usdc": 141.32,
+      "sells_usdc": 50.67
+    },
+    {
+      "market_start": "07:15",
+      "title": "Bitcoin Up or Down - February 21, 2:15AM-2:30AM ET",
+      "num_trades": 76,
+      "total_cost": 309.24,
+      "combined_avg": 0.6423,
+      "pnl_if_up": 30.0,
+      "pnl_if_down": -45.17,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 50,
+      "up_buy_usdc": 162.63,
+      "down_buy_usdc": 146.61,
+      "sells_usdc": 60.93
+    },
+    {
+      "market_start": "07:30",
+      "title": "Bitcoin Up or Down - February 21, 2:30AM-2:45AM ET",
+      "num_trades": 205,
+      "total_cost": 829.42,
+      "combined_avg": 0.602,
+      "pnl_if_up": 33.75,
+      "pnl_if_down": -5.22,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 412.59,
+      "down_buy_usdc": 416.83,
+      "sells_usdc": 154.82
+    },
+    {
+      "market_start": "07:45",
+      "title": "Bitcoin Up or Down - February 21, 2:45AM-3:00AM ET",
+      "num_trades": 90,
+      "total_cost": 399.45,
+      "combined_avg": 0.5834,
+      "pnl_if_up": -54.91,
+      "pnl_if_down": 89.58,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 153.85,
+      "down_buy_usdc": 245.6,
+      "sells_usdc": 74.44
+    },
+    {
+      "market_start": "08:00",
+      "title": "Bitcoin Up or Down - February 21, 3:00AM-3:15AM ET",
+      "num_trades": 113,
+      "total_cost": 567.93,
+      "combined_avg": 0.596,
+      "pnl_if_up": 1.28,
+      "pnl_if_down": 28.79,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 12,
+      "up_buy_usdc": 280.48,
+      "down_buy_usdc": 287.45,
+      "sells_usdc": 106.53
+    },
+    {
+      "market_start": "08:15",
+      "title": "Bitcoin Up or Down - February 21, 3:15AM-3:30AM ET",
+      "num_trades": 92,
+      "total_cost": 488.37,
+      "combined_avg": 0.5152,
+      "pnl_if_up": 74.55,
+      "pnl_if_down": 7.61,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 10,
+      "up_buy_usdc": 287.28,
+      "down_buy_usdc": 201.08,
+      "sells_usdc": 55.49
+    },
+    {
+      "market_start": "08:30",
+      "title": "Bitcoin Up or Down - February 21, 3:30AM-3:45AM ET",
+      "num_trades": 152,
+      "total_cost": 630.34,
+      "combined_avg": 0.5802,
+      "pnl_if_up": 282.22,
+      "pnl_if_down": -95.38,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 48,
+      "up_buy_usdc": 435.66,
+      "down_buy_usdc": 194.68,
+      "sells_usdc": 180.58
+    },
+    {
+      "market_start": "08:45",
+      "title": "Bitcoin Up or Down - February 21, 3:45AM-4:00AM ET",
+      "num_trades": 160,
+      "total_cost": 834.89,
+      "combined_avg": 0.4787,
+      "pnl_if_up": 479.12,
+      "pnl_if_down": -93.82,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 518.77,
+      "down_buy_usdc": 316.12,
+      "sells_usdc": 155.48
+    },
+    {
+      "market_start": "09:00",
+      "title": "Bitcoin Up or Down - February 21, 4:00AM-4:15AM ET",
+      "num_trades": 54,
+      "total_cost": 352.18,
+      "combined_avg": 0.4049,
+      "pnl_if_up": 572.73,
+      "pnl_if_down": -297.14,
+      "guaranteed": false,
+      "pos_type": "UP_ONLY",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 352.18,
+      "down_buy_usdc": 0,
+      "sells_usdc": 55.04
+    },
+    {
+      "market_start": "09:15",
+      "title": "Bitcoin Up or Down - February 21, 4:15AM-4:30AM ET",
+      "num_trades": 48,
+      "total_cost": 236.58,
+      "combined_avg": 0.2833,
+      "pnl_if_up": 141.3,
+      "pnl_if_down": 220.58,
+      "guaranteed": true,
+      "pos_type": "UP_HEAVY",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 208.77,
+      "down_buy_usdc": 27.81,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "09:30",
+      "title": "Bitcoin Up or Down - February 21, 4:30AM-4:45AM ET",
+      "num_trades": 156,
+      "total_cost": 1026.26,
+      "combined_avg": 0.8119,
+      "pnl_if_up": 155.81,
+      "pnl_if_down": -258.83,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 10,
+      "up_buy_usdc": 721.49,
+      "down_buy_usdc": 304.77,
+      "sells_usdc": 342.75
+    },
+    {
+      "market_start": "09:45",
+      "title": "Bitcoin Up or Down - February 21, 4:45AM-5:00AM ET",
+      "num_trades": 96,
+      "total_cost": 557.2,
+      "combined_avg": 0.6549,
+      "pnl_if_up": 117.09,
+      "pnl_if_down": -134.02,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 102,
+      "up_buy_usdc": 404.9,
+      "down_buy_usdc": 152.3,
+      "sells_usdc": 123.31
+    },
+    {
+      "market_start": "10:00",
+      "title": "Bitcoin Up or Down - February 21, 5:00AM-5:15AM ET",
+      "num_trades": 34,
+      "total_cost": 199.61,
+      "combined_avg": 0.3186,
+      "pnl_if_up": 50.53,
+      "pnl_if_down": 176.86,
+      "guaranteed": true,
+      "pos_type": "UP_HEAVY",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 169.51,
+      "down_buy_usdc": 30.1,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "10:15",
+      "title": "Bitcoin Up or Down - February 21, 5:15AM-5:30AM ET",
+      "num_trades": 82,
+      "total_cost": 456.17,
+      "combined_avg": 0.5556,
+      "pnl_if_up": 66.68,
+      "pnl_if_down": -96.26,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 12,
+      "up_buy_usdc": 246.87,
+      "down_buy_usdc": 209.31,
+      "sells_usdc": 30.85
+    },
+    {
+      "market_start": "10:30",
+      "title": "Bitcoin Up or Down - February 21, 5:30AM-5:45AM ET",
+      "num_trades": 90,
+      "total_cost": 553.33,
+      "combined_avg": 0.5692,
+      "pnl_if_up": 31.68,
+      "pnl_if_down": -85.23,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 60,
+      "up_buy_usdc": 328.61,
+      "down_buy_usdc": 224.72,
+      "sells_usdc": 40.46
+    },
+    {
+      "market_start": "10:45",
+      "title": "Bitcoin Up or Down - February 21, 5:45AM-6:00AM ET",
+      "num_trades": 43,
+      "total_cost": 334.06,
+      "combined_avg": 0.5318,
+      "pnl_if_up": 147.07,
+      "pnl_if_down": -187.06,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 68,
+      "up_buy_usdc": 219.23,
+      "down_buy_usdc": 114.83,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "11:00",
+      "title": "Bitcoin Up or Down - February 21, 6:00AM-6:15AM ET",
+      "num_trades": 125,
+      "total_cost": 513.63,
+      "combined_avg": 0.4833,
+      "pnl_if_up": 2.55,
+      "pnl_if_down": 183.81,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 24,
+      "up_buy_usdc": 233.13,
+      "down_buy_usdc": 280.5,
+      "sells_usdc": 75.46
+    },
+    {
+      "market_start": "11:15",
+      "title": "Bitcoin Up or Down - February 21, 6:15AM-6:30AM ET",
+      "num_trades": 62,
+      "total_cost": 311.14,
+      "combined_avg": 0.4731,
+      "pnl_if_up": 27.23,
+      "pnl_if_down": 8.16,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 139.02,
+      "down_buy_usdc": 172.11,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "11:30",
+      "title": "Bitcoin Up or Down - February 21, 6:30AM-6:45AM ET",
+      "num_trades": 33,
+      "total_cost": 180.4,
+      "combined_avg": 0.3623,
+      "pnl_if_up": 218.07,
+      "pnl_if_down": -80.93,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 112.38,
+      "down_buy_usdc": 68.02,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "11:45",
+      "title": "Bitcoin Up or Down - February 21, 6:45AM-7:00AM ET",
+      "num_trades": 64,
+      "total_cost": 299.01,
+      "combined_avg": 0.4733,
+      "pnl_if_up": -81.9,
+      "pnl_if_down": 164.01,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 38,
+      "up_buy_usdc": 118.25,
+      "down_buy_usdc": 180.76,
+      "sells_usdc": 24.21
+    },
+    {
+      "market_start": "12:00",
+      "title": "Bitcoin Up or Down - February 21, 7:00AM-7:15AM ET",
+      "num_trades": 61,
+      "total_cost": 503.56,
+      "combined_avg": 0.5458,
+      "pnl_if_up": -505.62,
+      "pnl_if_down": 517.06,
+      "guaranteed": false,
+      "pos_type": "DOWN_HEAVY",
+      "first_entry_delay": 32,
+      "up_buy_usdc": 59.36,
+      "down_buy_usdc": 444.2,
+      "sells_usdc": 47.94
+    },
+    {
+      "market_start": "12:15",
+      "title": "Bitcoin Up or Down - February 21, 7:15AM-7:30AM ET",
+      "num_trades": 95,
+      "total_cost": 677.62,
+      "combined_avg": 0.6778,
+      "pnl_if_up": -139.56,
+      "pnl_if_down": 65.7,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 298.19,
+      "down_buy_usdc": 379.43,
+      "sells_usdc": 140.79
+    },
+    {
+      "market_start": "12:30",
+      "title": "Bitcoin Up or Down - February 21, 7:30AM-7:45AM ET",
+      "num_trades": 54,
+      "total_cost": 421.98,
+      "combined_avg": 0.4065,
+      "pnl_if_up": -421.98,
+      "pnl_if_down": 616.15,
+      "guaranteed": false,
+      "pos_type": "DOWN_ONLY",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 0,
+      "down_buy_usdc": 421.98,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "12:45",
+      "title": "Bitcoin Up or Down - February 21, 7:45AM-8:00AM ET",
+      "num_trades": 77,
+      "total_cost": 542.89,
+      "combined_avg": 0.5764,
+      "pnl_if_up": -3.37,
+      "pnl_if_down": -107.39,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 32,
+      "up_buy_usdc": 358.12,
+      "down_buy_usdc": 184.77,
+      "sells_usdc": 16.59
+    },
+    {
+      "market_start": "13:00",
+      "title": "Bitcoin Up or Down - February 21, 8:00AM-8:15AM ET",
+      "num_trades": 40,
+      "total_cost": 319.2,
+      "combined_avg": 0.4511,
+      "pnl_if_up": -25.24,
+      "pnl_if_down": 94.41,
+      "guaranteed": false,
+      "pos_type": "DOWN_HEAVY",
+      "first_entry_delay": 28,
+      "up_buy_usdc": 50.61,
+      "down_buy_usdc": 268.6,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "13:15",
+      "title": "Bitcoin Up or Down - February 21, 8:15AM-8:30AM ET",
+      "num_trades": 62,
+      "total_cost": 394.7,
+      "combined_avg": 0.4214,
+      "pnl_if_up": 10.31,
+      "pnl_if_down": 149.39,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 72,
+      "up_buy_usdc": 185.27,
+      "down_buy_usdc": 209.43,
+      "sells_usdc": 6.21
+    },
+    {
+      "market_start": "13:30",
+      "title": "Bitcoin Up or Down - February 21, 8:30AM-8:45AM ET",
+      "num_trades": 54,
+      "total_cost": 330.43,
+      "combined_avg": 0.3772,
+      "pnl_if_up": 222.9,
+      "pnl_if_down": -7.83,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 124.01,
+      "down_buy_usdc": 206.42,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "13:45",
+      "title": "Bitcoin Up or Down - February 21, 8:45AM-9:00AM ET",
+      "num_trades": 27,
+      "total_cost": 173.59,
+      "combined_avg": 0.5935,
+      "pnl_if_up": -6.0,
+      "pnl_if_down": -48.7,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 118.99,
+      "down_buy_usdc": 54.59,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "14:00",
+      "title": "Bitcoin Up or Down - February 21, 9:00AM-9:15AM ET",
+      "num_trades": 101,
+      "total_cost": 640.18,
+      "combined_avg": 0.6588,
+      "pnl_if_up": -81.37,
+      "pnl_if_down": -28.73,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 134,
+      "up_buy_usdc": 280.59,
+      "down_buy_usdc": 359.59,
+      "sells_usdc": 99.25
+    },
+    {
+      "market_start": "14:15",
+      "title": "Bitcoin Up or Down - February 21, 9:15AM-9:30AM ET",
+      "num_trades": 81,
+      "total_cost": 739.61,
+      "combined_avg": 0.4781,
+      "pnl_if_up": 277.96,
+      "pnl_if_down": -210.35,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 14,
+      "up_buy_usdc": 597.9,
+      "down_buy_usdc": 141.71,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "14:30",
+      "title": "Bitcoin Up or Down - February 21, 9:30AM-9:45AM ET",
+      "num_trades": 123,
+      "total_cost": 1308.85,
+      "combined_avg": 0.3648,
+      "pnl_if_up": 552.22,
+      "pnl_if_down": 418.28,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 866.34,
+      "down_buy_usdc": 442.51,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "14:45",
+      "title": "Bitcoin Up or Down - February 21, 9:45AM-10:00AM ET",
+      "num_trades": 56,
+      "total_cost": 455.62,
+      "combined_avg": 0.5392,
+      "pnl_if_up": 128.9,
+      "pnl_if_down": 15.6,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 240.86,
+      "down_buy_usdc": 214.76,
+      "sells_usdc": 105.34
+    },
+    {
+      "market_start": "15:00",
+      "title": "Bitcoin Up or Down - February 21, 10:00AM-10:15AM ET",
+      "num_trades": 40,
+      "total_cost": 448.39,
+      "combined_avg": 0.5244,
+      "pnl_if_up": -33.12,
+      "pnl_if_down": 87.33,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 175.86,
+      "down_buy_usdc": 272.53,
+      "sells_usdc": 47.94
+    },
+    {
+      "market_start": "15:15",
+      "title": "Bitcoin Up or Down - February 21, 10:15AM-10:30AM ET",
+      "num_trades": 116,
+      "total_cost": 910.66,
+      "combined_avg": 0.4495,
+      "pnl_if_up": 213.88,
+      "pnl_if_down": 40.63,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 605.54,
+      "down_buy_usdc": 305.12,
+      "sells_usdc": 24.86
+    },
+    {
+      "market_start": "15:30",
+      "title": "Bitcoin Up or Down - February 21, 10:30AM-10:45AM ET",
+      "num_trades": 82,
+      "total_cost": 581.01,
+      "combined_avg": 0.5122,
+      "pnl_if_up": -20.24,
+      "pnl_if_down": 231.47,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 265.97,
+      "down_buy_usdc": 315.05,
+      "sells_usdc": 119.46
+    },
+    {
+      "market_start": "15:45",
+      "title": "Bitcoin Up or Down - February 21, 10:45AM-11:00AM ET",
+      "num_trades": 117,
+      "total_cost": 859.7,
+      "combined_avg": 0.5774,
+      "pnl_if_up": 242.44,
+      "pnl_if_down": -109.18,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 76,
+      "up_buy_usdc": 385.77,
+      "down_buy_usdc": 473.93,
+      "sells_usdc": 181.84
+    },
+    {
+      "market_start": "16:00",
+      "title": "Bitcoin Up or Down - February 21, 11:00AM-11:15AM ET",
+      "num_trades": 32,
+      "total_cost": 362.19,
+      "combined_avg": 0.4544,
+      "pnl_if_up": 172.24,
+      "pnl_if_down": -99.62,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 157.03,
+      "down_buy_usdc": 205.17,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "16:15",
+      "title": "Bitcoin Up or Down - February 21, 11:15AM-11:30AM ET",
+      "num_trades": 115,
+      "total_cost": 1026.53,
+      "combined_avg": 0.4886,
+      "pnl_if_up": -195.7,
+      "pnl_if_down": 275.39,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 305.34,
+      "down_buy_usdc": 721.19,
+      "sells_usdc": 15.9
+    },
+    {
+      "market_start": "16:30",
+      "title": "Bitcoin Up or Down - February 21, 11:30AM-11:45AM ET",
+      "num_trades": 61,
+      "total_cost": 637.55,
+      "combined_avg": 0.4181,
+      "pnl_if_up": -82.47,
+      "pnl_if_down": 332.14,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 208.2,
+      "down_buy_usdc": 429.36,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "16:45",
+      "title": "Bitcoin Up or Down - February 21, 11:45AM-12:00PM ET",
+      "num_trades": 14,
+      "total_cost": 89.41,
+      "combined_avg": 0.5134,
+      "pnl_if_up": -5.26,
+      "pnl_if_down": 0.59,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 10,
+      "up_buy_usdc": 37.17,
+      "down_buy_usdc": 52.24,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "17:00",
+      "title": "Bitcoin Up or Down - February 21, 12:00PM-12:15PM ET",
+      "num_trades": 26,
+      "total_cost": 299.96,
+      "combined_avg": 0.5803,
+      "pnl_if_up": -68.13,
+      "pnl_if_down": -14.87,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 16,
+      "up_buy_usdc": 86.34,
+      "down_buy_usdc": 213.62,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "17:15",
+      "title": "Bitcoin Up or Down - February 21, 12:15PM-12:30PM ET",
+      "num_trades": 37,
+      "total_cost": 494.08,
+      "combined_avg": 0.488,
+      "pnl_if_up": 195.24,
+      "pnl_if_down": -101.16,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 266.12,
+      "down_buy_usdc": 227.96,
+      "sells_usdc": 34.9
+    },
+    {
+      "market_start": "17:30",
+      "title": "Bitcoin Up or Down - February 21, 12:30PM-12:45PM ET",
+      "num_trades": 46,
+      "total_cost": 165.82,
+      "combined_avg": 0.4964,
+      "pnl_if_up": 3.89,
+      "pnl_if_down": -1.48,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 32,
+      "up_buy_usdc": 91.92,
+      "down_buy_usdc": 73.91,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "17:45",
+      "title": "Bitcoin Up or Down - February 21, 12:45PM-1:00PM ET",
+      "num_trades": 74,
+      "total_cost": 724.66,
+      "combined_avg": 0.7071,
+      "pnl_if_up": 88.05,
+      "pnl_if_down": -226.03,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 450.1,
+      "down_buy_usdc": 274.56,
+      "sells_usdc": 143.23
+    },
+    {
+      "market_start": "18:00",
+      "title": "Bitcoin Up or Down - February 21, 1:00PM-1:15PM ET",
+      "num_trades": 45,
+      "total_cost": 238.71,
+      "combined_avg": 0.3288,
+      "pnl_if_up": 423.19,
+      "pnl_if_down": -174.59,
+      "guaranteed": false,
+      "pos_type": "UP_HEAVY",
+      "first_entry_delay": 10,
+      "up_buy_usdc": 209.31,
+      "down_buy_usdc": 29.4,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "18:15",
+      "title": "Bitcoin Up or Down - February 21, 1:15PM-1:30PM ET",
+      "num_trades": 104,
+      "total_cost": 774.87,
+      "combined_avg": 0.4401,
+      "pnl_if_up": 89.13,
+      "pnl_if_down": 188.32,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 10,
+      "up_buy_usdc": 502.05,
+      "down_buy_usdc": 272.82,
+      "sells_usdc": 33.2
+    },
+    {
+      "market_start": "18:30",
+      "title": "Bitcoin Up or Down - February 21, 1:30PM-1:45PM ET",
+      "num_trades": 99,
+      "total_cost": 730.1,
+      "combined_avg": 0.4992,
+      "pnl_if_up": 171.86,
+      "pnl_if_down": 12.8,
+      "guaranteed": true,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 475.73,
+      "down_buy_usdc": 254.37,
+      "sells_usdc": 91.1
+    },
+    {
+      "market_start": "18:45",
+      "title": "Bitcoin Up or Down - February 21, 1:45PM-2:00PM ET",
+      "num_trades": 182,
+      "total_cost": 1450.62,
+      "combined_avg": 0.5327,
+      "pnl_if_up": -26.04,
+      "pnl_if_down": 371.72,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 616.92,
+      "down_buy_usdc": 833.69,
+      "sells_usdc": 261.9
+    },
+    {
+      "market_start": "19:00",
+      "title": "Bitcoin Up or Down - February 21, 2:00PM-2:15PM ET",
+      "num_trades": 72,
+      "total_cost": 395.1,
+      "combined_avg": 0.4861,
+      "pnl_if_up": 103.39,
+      "pnl_if_down": -21.64,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 204.45,
+      "down_buy_usdc": 190.65,
+      "sells_usdc": 29.6
+    },
+    {
+      "market_start": "19:15",
+      "title": "Bitcoin Up or Down - February 21, 2:15PM-2:30PM ET",
+      "num_trades": 68,
+      "total_cost": 469.7,
+      "combined_avg": 0.4551,
+      "pnl_if_up": 616.11,
+      "pnl_if_down": -367.08,
+      "guaranteed": false,
+      "pos_type": "UP_HEAVY",
+      "first_entry_delay": 4,
+      "up_buy_usdc": 459.06,
+      "down_buy_usdc": 10.64,
+      "sells_usdc": 78.13
+    },
+    {
+      "market_start": "19:30",
+      "title": "Bitcoin Up or Down - February 21, 2:30PM-2:45PM ET",
+      "num_trades": 35,
+      "total_cost": 227.48,
+      "combined_avg": 0.4262,
+      "pnl_if_up": 89.69,
+      "pnl_if_down": -10.9,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 141.44,
+      "down_buy_usdc": 86.04,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "19:45",
+      "title": "Bitcoin Up or Down - February 21, 2:45PM-3:00PM ET",
+      "num_trades": 8,
+      "total_cost": 51.3,
+      "combined_avg": 0.3288,
+      "pnl_if_up": 66.7,
+      "pnl_if_down": -13.3,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 30.02,
+      "down_buy_usdc": 21.28,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "20:00",
+      "title": "Bitcoin Up or Down - February 21, 3:00PM-3:15PM ET",
+      "num_trades": 55,
+      "total_cost": 392.3,
+      "combined_avg": 0.4062,
+      "pnl_if_up": 309.2,
+      "pnl_if_down": -127.97,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 90,
+      "up_buy_usdc": 225.54,
+      "down_buy_usdc": 166.76,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "20:15",
+      "title": "Bitcoin Up or Down - February 21, 3:15PM-3:30PM ET",
+      "num_trades": 41,
+      "total_cost": 259.9,
+      "combined_avg": 0.344,
+      "pnl_if_up": -11.53,
+      "pnl_if_down": 247.26,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 120,
+      "up_buy_usdc": 180.86,
+      "down_buy_usdc": 79.03,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "20:30",
+      "title": "Bitcoin Up or Down - February 21, 3:30PM-3:45PM ET",
+      "num_trades": 60,
+      "total_cost": 285.26,
+      "combined_avg": 0.5597,
+      "pnl_if_up": 110.03,
+      "pnl_if_down": -111.17,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 14,
+      "up_buy_usdc": 168.68,
+      "down_buy_usdc": 116.58,
+      "sells_usdc": 29.84
+    },
+    {
+      "market_start": "20:45",
+      "title": "Bitcoin Up or Down - February 21, 3:45PM-4:00PM ET",
+      "num_trades": 135,
+      "total_cost": 871.44,
+      "combined_avg": 0.5303,
+      "pnl_if_up": -610.34,
+      "pnl_if_down": 657.07,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 10,
+      "up_buy_usdc": 145.47,
+      "down_buy_usdc": 725.97,
+      "sells_usdc": 73.21
+    },
+    {
+      "market_start": "21:00",
+      "title": "Bitcoin Up or Down - February 21, 4:00PM-4:15PM ET",
+      "num_trades": 29,
+      "total_cost": 352.9,
+      "combined_avg": 0.4896,
+      "pnl_if_up": -241.59,
+      "pnl_if_down": 263.1,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 36,
+      "up_buy_usdc": 75.52,
+      "down_buy_usdc": 277.38,
+      "sells_usdc": 3.26
+    },
+    {
+      "market_start": "21:15",
+      "title": "Bitcoin Up or Down - February 21, 4:15PM-4:30PM ET",
+      "num_trades": 27,
+      "total_cost": 248.88,
+      "combined_avg": 0.3897,
+      "pnl_if_up": -44.12,
+      "pnl_if_down": 184.93,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 140.6,
+      "down_buy_usdc": 108.28,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "21:30",
+      "title": "Bitcoin Up or Down - February 21, 4:30PM-4:45PM ET",
+      "num_trades": 97,
+      "total_cost": 489.46,
+      "combined_avg": 0.4704,
+      "pnl_if_up": 327.68,
+      "pnl_if_down": -124.42,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 12,
+      "up_buy_usdc": 363.12,
+      "down_buy_usdc": 126.34,
+      "sells_usdc": 70.8
+    },
+    {
+      "market_start": "21:45",
+      "title": "Bitcoin Up or Down - February 21, 4:45PM-5:00PM ET",
+      "num_trades": 46,
+      "total_cost": 322.11,
+      "combined_avg": 0.4878,
+      "pnl_if_up": 105.44,
+      "pnl_if_down": -89.3,
+      "guaranteed": false,
+      "pos_type": "UP_HEAVY",
+      "first_entry_delay": 22,
+      "up_buy_usdc": 271.27,
+      "down_buy_usdc": 50.84,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "22:00",
+      "title": "Bitcoin Up or Down - February 21, 5:00PM-5:15PM ET",
+      "num_trades": 138,
+      "total_cost": 699.5,
+      "combined_avg": 0.6224,
+      "pnl_if_up": -49.34,
+      "pnl_if_down": 91.79,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 223.31,
+      "down_buy_usdc": 476.19,
+      "sells_usdc": 158.78
+    },
+    {
+      "market_start": "22:15",
+      "title": "Bitcoin Up or Down - February 21, 5:15PM-5:30PM ET",
+      "num_trades": 45,
+      "total_cost": 321.38,
+      "combined_avg": 0.4478,
+      "pnl_if_up": 217.88,
+      "pnl_if_down": -143.01,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 254.14,
+      "down_buy_usdc": 67.24,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "22:30",
+      "title": "Bitcoin Up or Down - February 21, 5:30PM-5:45PM ET",
+      "num_trades": 31,
+      "total_cost": 195.05,
+      "combined_avg": 0.3878,
+      "pnl_if_up": 176.7,
+      "pnl_if_down": -63.88,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 126.29,
+      "down_buy_usdc": 68.76,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "22:45",
+      "title": "Bitcoin Up or Down - February 21, 5:45PM-6:00PM ET",
+      "num_trades": 22,
+      "total_cost": 284.8,
+      "combined_avg": 0.4571,
+      "pnl_if_up": -157.78,
+      "pnl_if_down": 211.3,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 85.64,
+      "down_buy_usdc": 199.16,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "23:00",
+      "title": "Bitcoin Up or Down - February 21, 6:00PM-6:15PM ET",
+      "num_trades": 37,
+      "total_cost": 477.1,
+      "combined_avg": 0.4619,
+      "pnl_if_up": -93.92,
+      "pnl_if_down": 213.99,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 6,
+      "up_buy_usdc": 162.58,
+      "down_buy_usdc": 314.52,
+      "sells_usdc": 20.68
+    },
+    {
+      "market_start": "23:15",
+      "title": "Bitcoin Up or Down - February 21, 6:15PM-6:30PM ET",
+      "num_trades": 15,
+      "total_cost": 96.97,
+      "combined_avg": 0.2463,
+      "pnl_if_up": -6.18,
+      "pnl_if_down": 206.02,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 72,
+      "up_buy_usdc": 58.09,
+      "down_buy_usdc": 38.88,
+      "sells_usdc": 0
+    },
+    {
+      "market_start": "23:30",
+      "title": "Bitcoin Up or Down - February 21, 6:30PM-6:45PM ET",
+      "num_trades": 62,
+      "total_cost": 263.65,
+      "combined_avg": 0.417,
+      "pnl_if_up": -65.29,
+      "pnl_if_down": 179.66,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 118.58,
+      "down_buy_usdc": 145.07,
+      "sells_usdc": 4.68
+    },
+    {
+      "market_start": "23:45",
+      "title": "Bitcoin Up or Down - February 21, 6:45PM-7:00PM ET",
+      "num_trades": 53,
+      "total_cost": 370.12,
+      "combined_avg": 0.3298,
+      "pnl_if_up": 516.38,
+      "pnl_if_down": -116.73,
+      "guaranteed": false,
+      "pos_type": "BOTH_SIDES",
+      "first_entry_delay": 8,
+      "up_buy_usdc": 252.18,
+      "down_buy_usdc": 117.94,
+      "sells_usdc": 8.75
+    }
+  ],
+  "cross_day_comparison": {
+    "2026-02-20": {
+      "markets": 34,
+      "trades": 7842,
+      "total_deployed_usdc": 130661.47,
+      "dn_markets": 4,
+      "dn_pct": 11.8,
+      "avg_combined_avg": 0.5312,
+      "total_min_pnl": -22430.23,
+      "total_max_pnl": 21473.75,
+      "sells": 1363
+    },
+    "2026-02-21": {
+      "markets": 91,
+      "trades": 6930,
+      "total_deployed_usdc": 50082.98,
+      "dn_markets": 13,
+      "dn_pct": 14.3,
+      "avg_combined_avg": 0.5094,
+      "total_min_pnl": -9681.6,
+      "total_max_pnl": 19514.74,
+      "sells": 836
+    },
+    "2026-02-22": {
+      "markets": 75,
+      "trades": 4833,
+      "total_deployed_usdc": 32946.3,
+      "dn_markets": 18,
+      "dn_pct": 24.0,
+      "avg_combined_avg": 0.5224,
+      "total_min_pnl": -5062.64,
+      "total_max_pnl": 11811.71,
+      "sells": 646
+    }
+  }
+}

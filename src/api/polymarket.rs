@@ -13,7 +13,9 @@ use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use futures::StreamExt;
 use polymarket_client_sdk::clob::types::request::{LastTradePriceRequest, MidpointRequest};
+use polymarket_client_sdk::clob::types::Side;
 use polymarket_client_sdk::clob::ws::Client as WsClient;
+use polymarket_client_sdk::clob::ws::LastTradePrice;
 use polymarket_client_sdk::clob::{Client as ClobClient, Config};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive}; // <-- FIXED: Added FromPrimitive back
@@ -84,6 +86,21 @@ pub struct TokenPrices {
     pub last_ws_update_ms: i64, // NEW: Timestamp of last WebSocket update (vs API update)
     pub ws_message_count: u64, // NEW: Count of WebSocket messages received
     pub api_fallback_count: u64, // NEW: Count of API fallback calls
+    // --- ORDER BOOK DEPTH (from existing BOOK_STREAM, zero new connections) ---
+    pub bid_depth_3: f64,       // Total bid size across top 3 price levels
+    pub ask_depth_3: f64,       // Total ask size across top 3 price levels
+    pub bid_depth_all: f64,     // Total bid size across ALL levels
+    pub ask_depth_all: f64,     // Total ask size across ALL levels
+    pub bid_levels_count: u16,  // Number of distinct bid price levels
+    pub ask_levels_count: u16,  // Number of distinct ask price levels
+    pub book_imbalance: f64,    // (bid_all - ask_all) / (bid_all + ask_all), range [-1, 1]
+    // --- TRADE FLOW (from subscribe_last_trade_price) ---
+    pub last_trade_price: f64,
+    pub last_trade_size: f64,
+    pub last_trade_side: String,        // "BUY", "SELL", or ""
+    pub taker_buy_volume: f64,          // Cumulative taker-buy volume (shares)
+    pub taker_sell_volume: f64,         // Cumulative taker-sell volume (shares)
+    pub trade_count: u64,               // Total trades observed
 }
 
 impl TokenPrices {
@@ -105,6 +122,21 @@ impl TokenPrices {
             last_ws_update_ms: 0,
             ws_message_count: 0,
             api_fallback_count: 0,
+            // Order book depth
+            bid_depth_3: 0.0,
+            ask_depth_3: 0.0,
+            bid_depth_all: 0.0,
+            ask_depth_all: 0.0,
+            bid_levels_count: 0,
+            ask_levels_count: 0,
+            book_imbalance: 0.0,
+            // Trade flow
+            last_trade_price: 0.0,
+            last_trade_size: 0.0,
+            last_trade_side: "".to_string(),
+            taker_buy_volume: 0.0,
+            taker_sell_volume: 0.0,
+            trade_count: 0,
         }
     }
 
@@ -277,6 +309,10 @@ pub struct PolymarketOrderbookStream {
     /// Background tasks capture their generation at spawn and exit when superseded,
     /// preventing task accumulation across market rotations.
     stream_generation: Arc<AtomicU64>,
+    /// Total number of trade stream reconnections
+    trade_reconnect_count: Arc<AtomicU32>,
+    /// Timestamp of last trade stream reconnection
+    last_trade_reconnect_ms: Arc<AtomicU64>,
 }
 
 impl PolymarketOrderbookStream {
@@ -294,6 +330,8 @@ impl PolymarketOrderbookStream {
             total_ws_messages: Arc::new(AtomicU64::new(0)),
             total_api_fallbacks: Arc::new(AtomicU64::new(0)),
             stream_generation: Arc::new(AtomicU64::new(0)),
+            trade_reconnect_count: Arc::new(AtomicU32::new(0)),
+            last_trade_reconnect_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -869,6 +907,34 @@ impl PolymarketOrderbookStream {
                                         })
                                         .collect();
 
+                                    // --- Depth extraction (Phase 1) ---
+                                    let bid_depth_3: f64 = bid_levels.iter().take(3)
+                                        .filter_map(|l| l.size.to_f64())
+                                        .sum();
+                                    let ask_depth_3: f64 = ask_levels.iter().take(3)
+                                        .filter_map(|l| l.size.to_f64())
+                                        .sum();
+                                    let bid_depth_all: f64 = bid_levels.iter()
+                                        .filter_map(|l| l.size.to_f64())
+                                        .sum();
+                                    let ask_depth_all: f64 = ask_levels.iter()
+                                        .filter_map(|l| l.size.to_f64())
+                                        .sum();
+
+                                    prices.bid_depth_3 = bid_depth_3;
+                                    prices.ask_depth_3 = ask_depth_3;
+                                    prices.bid_depth_all = bid_depth_all;
+                                    prices.ask_depth_all = ask_depth_all;
+                                    prices.bid_levels_count = bid_levels.len() as u16;
+                                    prices.ask_levels_count = ask_levels.len() as u16;
+
+                                    let total = bid_depth_all + ask_depth_all;
+                                    prices.book_imbalance = if total > 0.0 {
+                                        (bid_depth_all - ask_depth_all) / total
+                                    } else {
+                                        0.0
+                                    };
+
                                     let bid_size =
                                         find_size_at_price(&bid_levels, target_bid_price);
                                     let mut ask_size =
@@ -990,6 +1056,138 @@ impl PolymarketOrderbookStream {
             }
 
             info!("[BOOK_STREAM] Gen {} task exited", book_gen);
+        });
+
+        // Spawn task to handle last trade price updates with reconnection logic
+        let prices_clone = Arc::clone(&self.prices);
+        let asset_ids_trade = asset_ids.clone();
+        let tx_trade = tx.clone();
+        let trade_reconnect_counter = Arc::clone(&self.trade_reconnect_count);
+        let last_trade_reconnect_ts = Arc::clone(&self.last_trade_reconnect_ms);
+        let total_ws_msgs_trade = Arc::clone(&self.total_ws_messages);
+        let trade_gen_ref = Arc::clone(&self.stream_generation);
+        let trade_gen = generation;
+
+        tokio::spawn(async move {
+            let mut reconnect_attempt = 0u32;
+            let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
+
+            info!("[TRADE_STREAM] Starting gen {} for {} tokens", trade_gen, asset_ids_trade.len());
+
+            loop {
+                if tx_trade.is_closed() {
+                    info!("[TRADE_STREAM] Channel closed, exiting");
+                    break;
+                }
+
+                if trade_gen_ref.load(Ordering::Relaxed) != trade_gen {
+                    info!("[TRADE_STREAM] Generation {} superseded, exiting", trade_gen);
+                    break;
+                }
+
+                let ws_client = WsClient::default();
+
+                if reconnect_attempt > 0 {
+                    warn!("[TRADE_STREAM] Reconnecting (attempt {})", reconnect_attempt + 1);
+                }
+
+                match ws_client.subscribe_last_trade_price(asset_ids_trade.clone()) {
+                    Ok(trade_stream) => {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        if reconnect_attempt > 0 {
+                            last_trade_reconnect_ts.store(now_ms as u64, Ordering::Relaxed);
+                            info!("[TRADE_STREAM] ✅ RECONNECTED after {} attempts", reconnect_attempt);
+                        } else {
+                            info!("[TRADE_STREAM] ✅ CONNECTED - WebSocket stream active");
+                        }
+
+                        let mut stream = Box::pin(trade_stream);
+                        reconnect_attempt = 0;
+                        reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
+
+                        loop {
+                            match stream.next().await {
+                                Some(Ok(trade)) => {
+                                    total_ws_msgs_trade.fetch_add(1, Ordering::Relaxed);
+
+                                    let token_id = trade.asset_id.to_string();
+
+                                    if let Some(mut prices) = prices_clone.get_mut(&token_id) {
+                                        prices.last_trade_price = trade.price.to_f64().unwrap_or(0.0);
+                                        prices.last_trade_size = trade.size
+                                            .and_then(|s| s.to_f64())
+                                            .unwrap_or(0.0);
+                                        prices.last_trade_side = match trade.side {
+                                            Some(Side::Buy) => "BUY".to_string(),
+                                            Some(Side::Sell) => "SELL".to_string(),
+                                            _ => "".to_string(),
+                                        };
+
+                                        let trade_size = prices.last_trade_size;
+                                        match trade.side {
+                                            Some(Side::Buy) => prices.taker_buy_volume += trade_size,
+                                            Some(Side::Sell) => prices.taker_sell_volume += trade_size,
+                                            _ => {} // Unknown or None, don't accumulate
+                                        }
+                                        prices.trade_count += 1;
+                                        prices.last_update_ms = chrono::Utc::now().timestamp_millis();
+                                        prices.last_ws_update_ms = trade.timestamp;
+                                        prices.ws_connected = true;
+                                        prices.consecutive_errors = 0;
+                                        prices.ws_message_count += 1;
+
+                                        debug!("[TRADE_STREAM] 📥 Trade for {}: price={}, size={:.1}, side={:?}",
+                                            token_id,
+                                            prices.last_trade_price,
+                                            prices.last_trade_size,
+                                            trade.side
+                                        );
+                                    }
+
+                                    if trade_gen_ref.load(Ordering::Relaxed) != trade_gen {
+                                        info!("[TRADE_STREAM] Generation {} superseded mid-stream, exiting", trade_gen);
+                                        return;
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    error!("[TRADE_STREAM] ❌ Stream error: {}", e);
+                                }
+                                None => {
+                                    warn!("[TRADE_STREAM] ⚠️ Stream ended, will reconnect");
+                                    break;
+                                }
+                            }
+                        }
+
+                        warn!("[TRADE_STREAM] 🔌 DISCONNECTED");
+                        trade_reconnect_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        error!("[TRADE_STREAM] ❌ Connection failed (attempt {}): {}", reconnect_attempt + 1, e);
+                    }
+                }
+
+                if MAX_RECONNECT_ATTEMPTS > 0 && reconnect_attempt >= MAX_RECONNECT_ATTEMPTS {
+                    error!("[TRADE_STREAM] Max reconnect attempts reached");
+                    break;
+                }
+
+                info!("[TRADE_STREAM] ⏳ Waiting {}ms before reconnect", reconnect_delay_ms);
+                tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+
+                if trade_gen_ref.load(Ordering::Relaxed) != trade_gen {
+                    info!("[TRADE_STREAM] Generation {} superseded during backoff, exiting", trade_gen);
+                    break;
+                }
+
+                reconnect_delay_ms = std::cmp::min(
+                    (reconnect_delay_ms as f64 * RECONNECT_BACKOFF_MULTIPLIER) as u64,
+                    MAX_RECONNECT_DELAY_MS,
+                );
+                reconnect_attempt += 1;
+            }
+
+            info!("[TRADE_STREAM] Gen {} task exited", trade_gen);
         });
 
         // Spawn health monitoring task
@@ -1345,6 +1543,8 @@ impl Clone for PolymarketOrderbookStream {
             total_ws_messages: Arc::clone(&self.total_ws_messages),
             total_api_fallbacks: Arc::clone(&self.total_api_fallbacks),
             stream_generation: Arc::clone(&self.stream_generation),
+            trade_reconnect_count: Arc::clone(&self.trade_reconnect_count),
+            last_trade_reconnect_ms: Arc::clone(&self.last_trade_reconnect_ms),
         }
     }
 }
