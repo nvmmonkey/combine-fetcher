@@ -11,7 +11,7 @@ Pipeline:
 5. Output one clean <slug>.csv per market
 
 Usage:
-    python3 fix_and_slugify.py ./218data/ -o ./218data/slugified
+    uv run fix_and_slugify.py ./218data/ -o ./218data/slugified
     python3 fix_and_slugify.py ./218data/ ./219data/ ./220data/ -o ./all_slugified
 """
 
