@@ -4,6 +4,7 @@
 //! including cryptocurrency exchanges and prediction markets.
 
 pub mod binance;
+pub mod binance_fixed;
 pub mod gamma;
 pub mod market_events;
 pub mod polymarket;
