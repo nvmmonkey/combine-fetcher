@@ -5,6 +5,24 @@
 //! BACKWARD COMPATIBLE: Original 23 columns preserved in same order
 //! NEW: 22 additional columns appended for latency/volatility/volume analysis
 //! NEW: Hourly CSV file rotation to prevent large file crashes
+//!
+//! CSV COLUMNS (83 total):
+//!   [1-23]  Original: timestamp, market_slug, binance_price, ..., outcome
+//!   [24-28] Latency: timestamp_unix_ms, binance_update_ms, poly_yes/no_update_ms, latency
+//!   [29-31] Binance OB: binance_bid, binance_ask, binance_spread_bps
+//!   [32-37] Volatility: vol_1sec..vol_89sec, volatility_regime
+//!   [38-39] Volume: volume_1sec, volume_spike
+//!   [40-42] Signal: signal_quality, trade_confidence, vol_data_source
+//!   [43-44] Spreads: yes_spread_bps, no_spread_bps
+//!   [45-54] RTDS: rtds_binance_price, ..., rtds_chainlink_stale_ms
+//!   [55-69] Polymarket Depth: yes/no_bid/ask_depth_3/all, levels, OBI, combined_obi
+//!   [70-76] Trade Flow: yes/no_last_trade_price/size/side, trade_flow_imbalance
+//!   [77-83] Binance Depth: binance_bid/ask_depth_3/all, levels, binance_book_imbalance,
+//!           binance_poly_obi_divergence (= binance_obi - polymarket_combined_obi)
+//!
+//! BINANCE OBI USAGE:
+//!   binance_book_imbalance < -0.20 AND combined_obi > -0.05
+//!     → Binance sellers dominating, Polymarket hasn't reacted → frontrun signal
 
 use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
@@ -130,6 +148,16 @@ pub struct CsvRecord {
     pub no_last_trade_size: f64,
     pub no_last_trade_side: String,
     pub trade_flow_imbalance: f64,
+
+    // === BINANCE L2 DEPTH (from Binance depth5@100ms stream) ===
+    pub binance_bid_depth_3: f64,
+    pub binance_ask_depth_3: f64,
+    pub binance_bid_depth_all: f64,
+    pub binance_ask_depth_all: f64,
+    pub binance_bid_levels: u16,
+    pub binance_ask_levels: u16,
+    pub binance_book_imbalance: f64,
+    pub binance_poly_obi_divergence: f64,
 }
 
 impl CsvRecord {
@@ -156,7 +184,11 @@ impl CsvRecord {
         yes_book_imbalance,no_book_imbalance,combined_obi,\
         yes_last_trade_price,yes_last_trade_size,yes_last_trade_side,\
         no_last_trade_price,no_last_trade_size,no_last_trade_side,\
-        trade_flow_imbalance"
+        trade_flow_imbalance,\
+        binance_bid_depth_3,binance_ask_depth_3,\
+        binance_bid_depth_all,binance_ask_depth_all,\
+        binance_bid_levels,binance_ask_levels,\
+        binance_book_imbalance,binance_poly_obi_divergence"
     }
 
     pub fn to_csv_line(&self) -> String {
@@ -177,7 +209,8 @@ impl CsvRecord {
             {:.0},{:.0},{:.0},{:.0},\
             {},{},{},{},\
             {:.4},{:.4},{:.4},\
-            {:.4},{:.0},{},{:.4},{:.0},{},{:.4}",
+            {:.4},{:.0},{},{:.4},{:.0},{},{:.4},\
+            {:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4}",
             // Original columns
             self.timestamp,
             self.market_slug,
@@ -262,6 +295,15 @@ impl CsvRecord {
             self.no_last_trade_size,
             self.no_last_trade_side,
             self.trade_flow_imbalance,
+            // Binance L2 Depth columns
+            self.binance_bid_depth_3,
+            self.binance_ask_depth_3,
+            self.binance_bid_depth_all,
+            self.binance_ask_depth_all,
+            self.binance_bid_levels,
+            self.binance_ask_levels,
+            self.binance_book_imbalance,
+            self.binance_poly_obi_divergence,
         )
     }
 }
@@ -914,6 +956,21 @@ async fn main() -> Result<()> {
             (total_buy - total_sell) / (total_buy + total_sell)
         } else { 0.0 };
 
+        // --- Binance L2 Depth ---
+        let binance_depth = binance_manager.get_depth_data("BTCUSDT").await;
+        let binance_bid_depth_3 = binance_depth.as_ref().map(|d| d.bid_depth_3).unwrap_or(0.0);
+        let binance_ask_depth_3 = binance_depth.as_ref().map(|d| d.ask_depth_3).unwrap_or(0.0);
+        let binance_bid_depth_all = binance_depth.as_ref().map(|d| d.bid_depth_all).unwrap_or(0.0);
+        let binance_ask_depth_all = binance_depth.as_ref().map(|d| d.ask_depth_all).unwrap_or(0.0);
+        let binance_bid_levels = binance_depth.as_ref().map(|d| d.bid_levels).unwrap_or(0);
+        let binance_ask_levels = binance_depth.as_ref().map(|d| d.ask_levels).unwrap_or(0);
+        let binance_book_imbalance = binance_depth.as_ref().map(|d| d.book_imbalance).unwrap_or(0.0);
+
+        // Binance vs Polymarket OBI divergence (leading indicator signal)
+        // Positive = Binance more bullish than Poly (Binance bids > asks, Poly hasn't reacted)
+        // Negative = Binance more bearish than Poly
+        let binance_poly_obi_divergence = binance_book_imbalance - combined_obi;
+
         // Build record (backward compatible order)
         let record = CsvRecord {
             // ORIGINAL 23 columns
@@ -1000,6 +1057,16 @@ async fn main() -> Result<()> {
             no_last_trade_size: sanitize(no_last_trade_size),
             no_last_trade_side,
             trade_flow_imbalance: sanitize(trade_flow_imbalance),
+
+            // Binance L2 Depth columns
+            binance_bid_depth_3: sanitize(binance_bid_depth_3),
+            binance_ask_depth_3: sanitize(binance_ask_depth_3),
+            binance_bid_depth_all: sanitize(binance_bid_depth_all),
+            binance_ask_depth_all: sanitize(binance_ask_depth_all),
+            binance_bid_levels,
+            binance_ask_levels,
+            binance_book_imbalance: sanitize(binance_book_imbalance),
+            binance_poly_obi_divergence: sanitize(binance_poly_obi_divergence),
         };
 
         // Write to current hourly file
