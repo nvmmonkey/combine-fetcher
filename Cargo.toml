@@ -32,6 +32,10 @@ path = "src/bin/debug_resolution.rs"
 name = "multi_market_logger_hourly_fixed"
 path = "src/bin/multi_market_logger_hourly_fixed.rs"
 
+[[bin]]
+name = "multi_asset_logger_fixed"
+path = "src/bin/multi_asset_logger_fixed.rs"
+
 
 # [[bin]]
 # name = "test_binance_bootstrap"
