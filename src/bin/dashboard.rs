@@ -1,10 +1,4 @@
-// btc_dashboard.rs — Real-time BTC/Polymarket Dashboard v4.0
-// v4.0 enhancements:
-//   - Position Books visualization (DN + DIR tracking)
-//   - Trade Timeline with exploit labels (TradeClass, ExploitTag)
-//   - Exploit Scoreboard with corrected P&L attribution
-//   - Risk Monitor panel with 12 alert conditions
-//   - 50+ new metrics for strategy transparency
+// btc_dashboard.rs — Real-time BTC/Polymarket Dashboard
 //
 // v3.1 fixes retained:
 //   1. classify_regime: "YES_TREND"->"YES_TRENDING", "NO_TREND"->"NO_TRENDING" (matches backtest)
@@ -109,19 +103,6 @@ fn cregime(r: &str) -> Color {
     }
 }
 
-fn csig(s: i32) -> Color {
-    if s <= -4 { CR } else if s <= -1 { COR } else if s == 0 { CGR }
-    else if s <= 2 { CC } else { CG }
-}
-
-fn sane_latency(ms: i64) -> Option<i64> {
-    if ms.abs() > MAX_SANE_LAT_MS { None } else { Some(ms) }
-}
-
-fn lat_str(ms: Option<i64>) -> String {
-    match ms { Some(v) => format!("{:>5}ms", v), None => " ~~~ ".into() }
-}
-
 fn fmt_usd(v: f64) -> String {
     if v.abs() >= 1_000_000.0 { format!("{:+.2}M", v / 1e6) }
     else if v.abs() >= 1_000.0 { format!("{:+.1}K", v / 1e3) }
@@ -202,98 +183,6 @@ fn z_score(spot: f64, strike: f64, vol: f64, ttx_min: f64) -> (f64, f64, &'stati
     if em < 1e-10 { return (0.0, 0.0, "YES"); }
     let z = (spot - strike) / em;
     (z, z.abs(), if z > 0.0 { "YES" } else { "NO" })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// New data structures for v4.0: Position Books, Trade Timeline, Risk Alerts
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Trade classification (11 variants covering all trade types from backtest)
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TradeClass {
-    DnSeed,           // DN initial seeding
-    DnCheap,          // DN cheap accumulation
-    DnLatency,        // DN latency-boosted
-    DnHedge,          // DN balance hedge
-    DnEmergencyPair,  // DN aggressive pair completion
-    DnFlipHedge,      // DN z-flip hedge
-    DirZScore,        // DIR standard directional
-    DirEmergencyLean, // DIR emergency lean
-    DirEmergencyHedge,// DIR emergency hedge
-    DirFlipHedge,     // DIR post-commit flip hedge
-    DirChainlinkArb,  // DIR Chainlink resolution arb (Exploit 4)
-}
-
-impl TradeClass {
-    fn color(&self) -> Color {
-        match self {
-            TradeClass::DnSeed => CC,           // Cyan: foundational
-            TradeClass::DnCheap => CC,          // Cyan: accumulation
-            TradeClass::DnLatency => CTL,       // Teal: latency-boosted
-            TradeClass::DnHedge => Color::Rgb(80, 144, 255),  // Blue
-            TradeClass::DnEmergencyPair => CY,  // Yellow: urgent
-            TradeClass::DnFlipHedge => COR,     // Orange: reactive
-            TradeClass::DirZScore => CG,        // Green: confident directional
-            TradeClass::DirEmergencyLean => CY, // Yellow: urgent rescue
-            TradeClass::DirEmergencyHedge => COR,// Orange: defensive rescue
-            TradeClass::DirFlipHedge => CM,     // Magenta: instability response
-            TradeClass::DirChainlinkArb => CGD, // Gold: high-conviction exploit
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            TradeClass::DnSeed => "SEED",
-            TradeClass::DnCheap => "CHEAP",
-            TradeClass::DnLatency => "LATENCY",
-            TradeClass::DnHedge => "HEDGE",
-            TradeClass::DnEmergencyPair => "EMER_PAIR",
-            TradeClass::DnFlipHedge => "FLIP_HEDGE",
-            TradeClass::DirZScore => "Z-SCORE",
-            TradeClass::DirEmergencyLean => "EMER_LEAN",
-            TradeClass::DirEmergencyHedge => "EMER_HEDGE",
-            TradeClass::DirFlipHedge => "FLIP_HEDGE",
-            TradeClass::DirChainlinkArb => "CL_ARB",
-        }
-    }
-}
-
-/// Exploit tags (additive — single trade can have multiple)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExploitTag {
-    SnipeFiltered,  // Exploit 1: passed snipe check
-    EdgeScaled,     // Exploit 2: edge-scaled size
-    StaleGated,     // Exploit 3: passed stale gate
-    ChainlinkArb,   // Exploit 4: Chainlink arb
-}
-
-impl ExploitTag {
-    fn badge(&self) -> &'static str {
-        match self {
-            ExploitTag::SnipeFiltered => "S",
-            ExploitTag::EdgeScaled => "E",
-            ExploitTag::StaleGated => "G",
-            ExploitTag::ChainlinkArb => "C",
-        }
-    }
-}
-
-/// Single trade event
-#[derive(Debug, Clone)]
-pub struct TradeEvent {
-    pub tick: u32,
-    pub book: &'static str,  // "DN" or "DIR"
-    pub side: &'static str,  // "YES" or "NO"
-    pub shares: u32,
-    pub price: f64,
-    pub cost: f64,
-    pub z_score: f64,
-    pub abs_z: f64,
-    pub trade_class: TradeClass,
-    pub exploit_tags: Vec<ExploitTag>,
-    pub rtds_adv_bps: f64,
-    pub regime: String,
-    pub time_pct: f64,
 }
 
 /// Risk alert
@@ -536,11 +425,18 @@ impl TempCsv {
             "temp_dash_{}_{}.csv", slug, now.format("%H%M%S")));
         let f = fs::OpenOptions::new().create(true).write(true).open(&p)?;
         let mut w = io::BufWriter::with_capacity(32 * 1024, f);
-        // Header matches the fields written in TempCsv::write() below — 23 cols
+        // Header matches the fields written in TempCsv::write() below
         writeln!(w,
             "timestamp,slug,price,yes_ask,no_ask,strike,ttx_min,z_score,abs_z,\
              z_dir,exp_move_pct,regime,conf_score,conf_votes,rtds_stale,\
-             rtds_adv_bps,obi,cvd_1m,cvd_5m,delta,vol,dev_usd,dev_pct")?;
+             rtds_adv_bps,obi,cvd_1m,cvd_5m,delta,vol,dev_usd,dev_pct,\
+             yes_bid_depth_3,yes_ask_depth_3,no_bid_depth_3,no_ask_depth_3,\
+             yes_bid_depth_all,yes_ask_depth_all,no_bid_depth_all,no_ask_depth_all,\
+             yes_bid_levels,yes_ask_levels,no_bid_levels,no_ask_levels,\
+             yes_book_imbalance,no_book_imbalance,combined_depth_obi,\
+             yes_last_trade_price,yes_last_trade_size,yes_last_trade_side,\
+             no_last_trade_price,no_last_trade_size,no_last_trade_side,\
+             trade_flow_imbalance")?;
         self.slug = slug.into();
         self.path = p;
         self.w    = Some(w);
@@ -551,13 +447,28 @@ impl TempCsv {
         if let Some(ref mut w) = self.w {
             writeln!(w,
                 "{},{},{:.2},{:.4},{:.4},{:.2},{:.2},{:+.4},{:.4},{},{:.5},{},{:.2},{},{},\
-                 {:.2},{:+.4},{:.0},{:.0},{:.8},{:.6},{:+.2},{:+.4}",
+                 {:.2},{:+.4},{:.0},{:.0},{:.8},{:.6},{:+.2},{:+.4},\
+                 {:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},\
+                 {},{},{},{},{:+.4},{:+.4},{:+.4},\
+                 {:.4},{:.2},{},{:.4},{:.2},{},{:+.4}",
                 r.ts, r.slug, r.btc, r.yes_ask, r.no_ask, r.strike, r.ttx,
                 r.z, r.abs_z, r.z_dir, r.exp_move, r.regime,
                 r.conf.score, r.conf.votes,
                 r.rtds_stale, r.rtds_adv,
                 r.obi, r.cvd1m, r.cvd5m,
                 r.delta, r.vol, r.dev_usd, r.dev_pct,
+                // L2 depth
+                r.yes_bid_depth_3, r.yes_ask_depth_3,
+                r.no_bid_depth_3, r.no_ask_depth_3,
+                r.yes_bid_depth_all, r.yes_ask_depth_all,
+                r.no_bid_depth_all, r.no_ask_depth_all,
+                r.yes_bid_levels, r.yes_ask_levels,
+                r.no_bid_levels, r.no_ask_levels,
+                r.yes_book_imbalance, r.no_book_imbalance, r.combined_depth_obi,
+                // Trade flow
+                r.yes_last_trade_price, r.yes_last_trade_size, r.yes_last_trade_side,
+                r.no_last_trade_price, r.no_last_trade_size, r.no_last_trade_side,
+                r.trade_flow_imbalance,
             )?;
             w.flush()?;
         }
@@ -616,39 +527,24 @@ struct Row {
     obi: f64,
     cvd1m: f64, cvd3m: f64, cvd5m: f64,
 
-    // v4.0: Position Books (DN + DIR)
-    dn_yes_shares: u32,
-    dn_no_shares: u32,
-    dn_combined_avg: Option<f64>,
-    dn_ew: bool,
-    dn_abandoned: bool,
-    dn_imbalance: f64,
-    dn_min_pnl: f64,
-    dr_yes_shares: u32,
-    dr_no_shares: u32,
-    dr_committed_dir: Option<&'static str>,  // "YES" or "NO"
-    dr_frozen: bool,
-    dr_post_flip_count: u32,
-    total_exposure: f64,
-    max_exposure: f64,
+    // L2 orderbook depth
+    yes_bid_depth_3: f64, yes_ask_depth_3: f64,
+    no_bid_depth_3: f64,  no_ask_depth_3: f64,
+    yes_bid_depth_all: f64, yes_ask_depth_all: f64,
+    no_bid_depth_all: f64,  no_ask_depth_all: f64,
+    yes_bid_levels: u16, yes_ask_levels: u16,
+    no_bid_levels: u16,  no_ask_levels: u16,
+    yes_book_imbalance: f64, no_book_imbalance: f64,
+    combined_depth_obi: f64,
 
-    // v4.0: Trade Timeline
-    recent_trades: VecDeque<TradeEvent>,
+    // Trade flow
+    yes_last_trade_price: f64, yes_last_trade_size: f64,
+    yes_last_trade_side: String,
+    no_last_trade_price: f64, no_last_trade_size: f64,
+    no_last_trade_side: String,
+    trade_flow_imbalance: f64,
 
-    // v4.0: Exploit Metrics
-    snipe_dn_trades: u32,
-    snipe_dir_trades: u32,
-    snipe_blocked: u32,
-    snipe_edge_sum_bps: f64,
-    edge_scaled_trades: u32,
-    edge_avg_scale: f64,
-    exploit3_dn_gated: u32,
-    exploit3_dir_gated: u32,
-    chainlink_arb_trades: u32,
-    chainlink_arb_profit: f64,
-    chainlink_arb_roi: f64,
-
-    // v4.0: Risk Alerts
+    // Risk Alerts
     alerts: Vec<RiskAlert>,
 }
 
@@ -1192,72 +1088,142 @@ fn render_zscore(f: &mut Frame, area: Rect, row: &Row) {
 // ═════════════════════════════════════════════════════════════════════════════
 // PANEL: Order book
 // ═════════════════════════════════════════════════════════════════════════════
+/// Build a depth bar: filled proportional to depth relative to max, using block characters
+fn depth_bar(depth: f64, max_depth: f64, width: usize, color: Color) -> Vec<Span<'static>> {
+    let ratio = if max_depth > 0.0 { (depth / max_depth).clamp(0.0, 1.0) } else { 0.0 };
+    let filled = (ratio * width as f64).round() as usize;
+    vec![
+        Span::styled("█".repeat(filled.min(width)),         Style::default().fg(color)),
+        Span::styled("░".repeat(width.saturating_sub(filled)), Style::default().fg(CDIM)),
+    ]
+}
+
+/// Imbalance mini-bar: negative=red left, positive=green right
+fn imbalance_bar(imb: f64, width: usize) -> Vec<Span<'static>> {
+    let half = width / 2;
+    let mag = (imb.abs() * half as f64).round() as usize;
+    let filled = mag.min(half);
+    if imb >= 0.0 {
+        vec![
+            Span::styled("░".repeat(half),          Style::default().fg(CDIM)),
+            Span::styled("│",                        Style::default().fg(CGR)),
+            Span::styled("▓".repeat(filled),         Style::default().fg(CG)),
+            Span::styled("░".repeat(half - filled),  Style::default().fg(CDIM)),
+        ]
+    } else {
+        vec![
+            Span::styled("░".repeat(half - filled),  Style::default().fg(CDIM)),
+            Span::styled("▓".repeat(filled),         Style::default().fg(CR)),
+            Span::styled("│",                        Style::default().fg(CGR)),
+            Span::styled("░".repeat(half),           Style::default().fg(CDIM)),
+        ]
+    }
+}
+
 fn render_book(f: &mut Frame, area: Rect, row: &Row) {
     let oc       = if row.obi < -0.2 { CR } else if row.obi > 0.2 { CG } else { CGR };
-    let lbl      = if row.obi < -0.15 { "BEARISH" } else if row.obi > 0.15 { "BULLISH" } else { "NEUTRAL" };
+    let lbl      = if row.obi < -0.15 { "BEAR" } else if row.obi > 0.15 { "BULL" } else { "NEUT" };
     let combined = row.yes_ask + row.no_ask;
     let comb_c   = if combined < 1.0 { CG } else { CR };
 
-    let lines = vec![
+    // Max depth for bar scaling
+    let max_d3 = [row.yes_bid_depth_3, row.yes_ask_depth_3, row.no_bid_depth_3, row.no_ask_depth_3]
+        .iter().cloned().fold(1.0_f64, f64::max);
+    let max_da = [row.yes_bid_depth_all, row.yes_ask_depth_all, row.no_bid_depth_all, row.no_ask_depth_all]
+        .iter().cloned().fold(1.0_f64, f64::max);
+
+    let mut lines = vec![
         Line::from(vec![
             Span::styled(" OBI ",  Style::default().fg(CM).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:+.1}%", row.obi * 100.0),
+            Span::styled(format!("{:+.1}% {lbl}", row.obi * 100.0),
                 Style::default().fg(oc).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {lbl}"), Style::default().fg(oc)),
         ]),
         obi_bar(row.obi, 26),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ YES ────────────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" BID ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.yes_bid),    Style::default().fg(CG)),
-            Span::styled(format!(" ×{:.0}", row.yes_bid_sz), Style::default().fg(CDIM)),
-            Span::styled(" ASK ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.yes_ask),    Style::default().fg(CR)),
-            Span::styled(format!(" ×{:.0}", row.yes_ask_sz), Style::default().fg(CDIM)),
-        ]),
-        Line::from(vec![
-            Span::styled(" Spr ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.1}bps", row.yes_spr_bps), Style::default().fg(CY)),
-            Span::styled(" Fee ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.3}%", row.yes_fee),   Style::default().fg(COR)),
-        ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ NO ─────────────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" BID ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.no_bid),     Style::default().fg(CG)),
-            Span::styled(format!(" ×{:.0}", row.no_bid_sz),  Style::default().fg(CDIM)),
-            Span::styled(" ASK ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.no_ask),     Style::default().fg(CR)),
-            Span::styled(format!(" ×{:.0}", row.no_ask_sz),  Style::default().fg(CDIM)),
-        ]),
-        Line::from(vec![
-            Span::styled(" Spr ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.1}bps", row.no_spr_bps),  Style::default().fg(CY)),
-            Span::styled(" Fee ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.3}%", row.no_fee),    Style::default().fg(COR)),
-        ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ COMBINED ───────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" YES+NO ask ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", combined),
-                Style::default().fg(comb_c).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                if combined < 1.0 { " ✅ ARB!" } else { "" },
-                Style::default().fg(CG).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ BINANCE ────────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" BID ", Style::default().fg(CGR)),
-            Span::styled(format!("${:.2}", row.bnc_bid),   Style::default().fg(CG)),
-            Span::styled(" ASK ", Style::default().fg(CGR)),
-            Span::styled(format!("${:.2}", row.bnc_ask),   Style::default().fg(CR)),
-            Span::styled(format!(" {:.1}bps", row.bnc_spr_bps), Style::default().fg(CY)),
-        ]),
     ];
+
+    // ── YES ──
+    lines.push(Line::from(vec![Span::styled(" ─ YES ─────────────────", Style::default().fg(CDIM))]));
+    lines.push(Line::from(vec![
+        Span::styled(" B ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.4}", row.yes_bid),    Style::default().fg(CG)),
+        Span::styled(format!("×{:.0}", row.yes_bid_sz), Style::default().fg(CDIM)),
+        Span::styled(" A ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.4}", row.yes_ask),    Style::default().fg(CR)),
+        Span::styled(format!("×{:.0}", row.yes_ask_sz), Style::default().fg(CDIM)),
+        Span::styled(format!(" {:.1}bp", row.yes_spr_bps), Style::default().fg(CY)),
+    ]));
+    // Depth 3-level
+    let mut d3_line = vec![Span::styled(" 3L ", Style::default().fg(CGR))];
+    d3_line.extend(depth_bar(row.yes_bid_depth_3, max_d3, 8, CG));
+    d3_line.push(Span::styled("│", Style::default().fg(CDIM)));
+    d3_line.extend(depth_bar(row.yes_ask_depth_3, max_d3, 8, CR));
+    d3_line.push(Span::styled(format!(" {:.0}/{:.0}", row.yes_bid_depth_3, row.yes_ask_depth_3), Style::default().fg(CGR)));
+    lines.push(Line::from(d3_line));
+    // Depth all-level + level count
+    let mut da_line = vec![Span::styled(" AL ", Style::default().fg(CGR))];
+    da_line.extend(depth_bar(row.yes_bid_depth_all, max_da, 8, CG));
+    da_line.push(Span::styled("│", Style::default().fg(CDIM)));
+    da_line.extend(depth_bar(row.yes_ask_depth_all, max_da, 8, CR));
+    da_line.push(Span::styled(format!(" {}L/{}L", row.yes_bid_levels, row.yes_ask_levels), Style::default().fg(CGR)));
+    lines.push(Line::from(da_line));
+    // YES imbalance
+    let mut yi_line = vec![Span::styled(" IM ", Style::default().fg(CGR))];
+    yi_line.extend(imbalance_bar(row.yes_book_imbalance, 20));
+    yi_line.push(Span::styled(format!(" {:+.0}%", row.yes_book_imbalance * 100.0),
+        Style::default().fg(cs(row.yes_book_imbalance))));
+    lines.push(Line::from(yi_line));
+
+    // ── NO ──
+    lines.push(Line::from(vec![Span::styled(" ─ NO ──────────────────", Style::default().fg(CDIM))]));
+    lines.push(Line::from(vec![
+        Span::styled(" B ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.4}", row.no_bid),     Style::default().fg(CG)),
+        Span::styled(format!("×{:.0}", row.no_bid_sz), Style::default().fg(CDIM)),
+        Span::styled(" A ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.4}", row.no_ask),     Style::default().fg(CR)),
+        Span::styled(format!("×{:.0}", row.no_ask_sz), Style::default().fg(CDIM)),
+        Span::styled(format!(" {:.1}bp", row.no_spr_bps), Style::default().fg(CY)),
+    ]));
+    let mut nd3_line = vec![Span::styled(" 3L ", Style::default().fg(CGR))];
+    nd3_line.extend(depth_bar(row.no_bid_depth_3, max_d3, 8, CG));
+    nd3_line.push(Span::styled("│", Style::default().fg(CDIM)));
+    nd3_line.extend(depth_bar(row.no_ask_depth_3, max_d3, 8, CR));
+    nd3_line.push(Span::styled(format!(" {:.0}/{:.0}", row.no_bid_depth_3, row.no_ask_depth_3), Style::default().fg(CGR)));
+    lines.push(Line::from(nd3_line));
+    let mut nda_line = vec![Span::styled(" AL ", Style::default().fg(CGR))];
+    nda_line.extend(depth_bar(row.no_bid_depth_all, max_da, 8, CG));
+    nda_line.push(Span::styled("│", Style::default().fg(CDIM)));
+    nda_line.extend(depth_bar(row.no_ask_depth_all, max_da, 8, CR));
+    nda_line.push(Span::styled(format!(" {}L/{}L", row.no_bid_levels, row.no_ask_levels), Style::default().fg(CGR)));
+    lines.push(Line::from(nda_line));
+    let mut ni_line = vec![Span::styled(" IM ", Style::default().fg(CGR))];
+    ni_line.extend(imbalance_bar(row.no_book_imbalance, 20));
+    ni_line.push(Span::styled(format!(" {:+.0}%", row.no_book_imbalance * 100.0),
+        Style::default().fg(cs(row.no_book_imbalance))));
+    lines.push(Line::from(ni_line));
+
+    // ── COMBINED + ARB ──
+    lines.push(Line::from(vec![Span::styled(" ─ COMBINED ────────────", Style::default().fg(CDIM))]));
+    lines.push(Line::from(vec![
+        Span::styled(" Y+N ", Style::default().fg(CGR)),
+        Span::styled(format!("{:.4}", combined),
+            Style::default().fg(comb_c).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if combined < 1.0 { " ARB!" } else { "" },
+            Style::default().fg(CG).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" DOBI {:+.0}%", row.combined_depth_obi * 100.0),
+            Style::default().fg(cs(row.combined_depth_obi))),
+    ]));
+
+    // ── BINANCE ──
+    lines.push(Line::from(vec![Span::styled(" ─ BINANCE ─────────────", Style::default().fg(CDIM))]));
+    lines.push(Line::from(vec![
+        Span::styled(" B ", Style::default().fg(CGR)),
+        Span::styled(format!("${:.2}", row.bnc_bid),   Style::default().fg(CG)),
+        Span::styled(" A ", Style::default().fg(CGR)),
+        Span::styled(format!("${:.2}", row.bnc_ask),   Style::default().fg(CR)),
+        Span::styled(format!(" {:.1}bp", row.bnc_spr_bps), Style::default().fg(CY)),
+    ]));
 
     f.render_widget(
         Paragraph::new(lines)
@@ -1270,14 +1236,25 @@ fn render_book(f: &mut Frame, area: Rect, row: &Row) {
 // ═════════════════════════════════════════════════════════════════════════════
 // PANEL: Flow / CVD / RTDS
 // ═════════════════════════════════════════════════════════════════════════════
-fn render_flow(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
+fn render_market_flow(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     let c1 = hist.c1();
     let c3 = hist.c3();
     let c5 = hist.c5();
     let vc = match row.vol_regime.as_str() { "HIGH" => CR, "MEDIUM" => COR, _ => CTL };
 
+    // Latency (compact, 1 line)
+    let b_age  = (row.now_ms - row.bnc_update_ms).clamp(0, MAX_SANE_LAT_MS);
+    let py_age = (row.now_ms - row.poly_yes_ms).clamp(0, MAX_SANE_LAT_MS);
+    let pn_age = (row.now_ms - row.poly_no_ms).clamp(0, MAX_SANE_LAT_MS);
+
+    // Trade side colors
+    let yt_c = if row.yes_last_trade_side == "BUY" { CG } else if row.yes_last_trade_side == "SELL" { CR } else { CGR };
+    let nt_c = if row.no_last_trade_side == "BUY" { CG } else if row.no_last_trade_side == "SELL" { CR } else { CGR };
+    let fi_c = cs(row.trade_flow_imbalance);
+
     let lines = vec![
-        Line::from(vec![Span::styled(" ─ CVD ─────────────────────────", Style::default().fg(CDIM))]),
+        // ── CVD ──
+        Line::from(vec![Span::styled(" ─ CVD ─────────────────", Style::default().fg(CDIM))]),
         Line::from(vec![
             Span::styled(" 1m ", Style::default().fg(CGR)),
             Span::styled(fmt_usd(c1), Style::default().fg(cs(c1)).add_modifier(Modifier::BOLD)),
@@ -1286,154 +1263,85 @@ fn render_flow(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
             Span::styled(" 5m ", Style::default().fg(CGR)),
             Span::styled(fmt_usd(c5), Style::default().fg(cs(c5))),
         ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ VOLUME ──────────────────────", Style::default().fg(CDIM))]),
+        // ── Trade Flow (new!) ──
+        Line::from(vec![Span::styled(" ─ TRADE FLOW ──────────", Style::default().fg(CDIM))]),
         Line::from(vec![
-            Span::styled(" 1s ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.0}", row.vol_1sec),  Style::default().fg(CW)),
-            Span::styled(" 1m ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.0}", row.vol_1min),  Style::default().fg(CW)),
-            if row.vol_spike {
-                Span::styled(" 🔥 SPIKE", Style::default().fg(CR).add_modifier(Modifier::BOLD))
-            } else { Span::raw("") },
-        ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ VOLATILITY ──────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" 1s ",  Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.vol_1s),  Style::default().fg(CC)),
-            Span::styled(" 5s ",  Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.vol_5s),  Style::default().fg(CC)),
+            Span::styled(" Y ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.3}", row.yes_last_trade_price), Style::default().fg(CW)),
+            Span::styled(format!("×{:.0}", row.yes_last_trade_size), Style::default().fg(CDIM)),
+            Span::styled(
+                format!(" {}", if row.yes_last_trade_side.is_empty() { "---" } else { &row.yes_last_trade_side }),
+                Style::default().fg(yt_c).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled(" 13s ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.vol_13s), Style::default().fg(CC)),
-            Span::styled(" 34s ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.vol_34s), Style::default().fg(CC)),
-            Span::styled(" 89s ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.vol_89s), Style::default().fg(CC)),
+            Span::styled(" N ", Style::default().fg(CGR)),
+            Span::styled(format!("{:.3}", row.no_last_trade_price), Style::default().fg(CW)),
+            Span::styled(format!("×{:.0}", row.no_last_trade_size), Style::default().fg(CDIM)),
+            Span::styled(
+                format!(" {}", if row.no_last_trade_side.is_empty() { "---" } else { &row.no_last_trade_side }),
+                Style::default().fg(nt_c).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled(" RealVol ", Style::default().fg(CGR)),
+            Span::styled(" Flow ", Style::default().fg(CGR)),
+            Span::styled(format!("{:+.0}%", row.trade_flow_imbalance * 100.0),
+                Style::default().fg(fi_c).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if row.trade_flow_imbalance > 0.3 { " BUY↑" }
+                else if row.trade_flow_imbalance < -0.3 { " SELL↓" }
+                else { "" },
+                Style::default().fg(fi_c)),
+        ]),
+        // ── RTDS (compact) ──
+        Line::from(vec![Span::styled(" ─ RTDS ────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled(" Adv ",    Style::default().fg(CGR)),
+            Span::styled(
+                format!("{:.1}bp", row.rtds_adv),
+                Style::default().fg(if row.rtds_stale { CG } else { CGR })),
+            Span::styled(
+                if row.rtds_stale { " STALE" } else { " fresh" },
+                Style::default().fg(if row.rtds_stale { CG } else { CGR }).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" CL{:.1}bp", row.rtds_cl_dev),
+                Style::default().fg(cs(row.rtds_cl_dev))),
+        ]),
+        Line::from(vec![
+            Span::styled(" Bst ",  Style::default().fg(CGR)),
+            Span::styled(
+                format!("{}ms", row.rtds_bnc_stale_ms),
+                Style::default().fg(cstale(row.rtds_bnc_stale_ms))),
+            Span::styled(" CLst ", Style::default().fg(CGR)),
+            Span::styled(
+                format!("{}ms", row.rtds_cl_stale_ms),
+                Style::default().fg(cstale(row.rtds_cl_stale_ms))),
+        ]),
+        // ── Vol + Regime (compact) ──
+        Line::from(vec![Span::styled(" ─ VOL ─────────────────", Style::default().fg(CDIM))]),
+        Line::from(vec![
+            Span::styled(" Real ", Style::default().fg(CGR)),
             Span::styled(
                 format!("{:.4}%", row.realized_vol * 100.0),
                 Style::default().fg(CGD).add_modifier(Modifier::BOLD)),
             Span::styled(" Regime ", Style::default().fg(CGR)),
             Span::styled(&row.vol_regime, Style::default().fg(vc).add_modifier(Modifier::BOLD)),
+            if row.vol_spike {
+                Span::styled(" SPIKE", Style::default().fg(CR).add_modifier(Modifier::BOLD))
+            } else { Span::raw("") },
         ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ RTDS ────────────────────────", Style::default().fg(CDIM))]),
+        // ── Latency (compact, 1 line) ──
         Line::from(vec![
-            Span::styled(" Adv ",    Style::default().fg(CGR)),
-            Span::styled(
-                format!("{:.2}bps", row.rtds_adv),
-                Style::default().fg(if row.rtds_stale { CG } else { CGR })),
-            Span::styled(" CL-dev ", Style::default().fg(CGR)),
-            Span::styled(
-                format!("{:.2}bps", row.rtds_cl_dev),
-                Style::default().fg(cs(row.rtds_cl_dev))),
-        ]),
-        Line::from(vec![
-            Span::styled(" B-stale ",  Style::default().fg(CGR)),
-            Span::styled(
-                format!("{}ms", row.rtds_bnc_stale_ms),
-                Style::default().fg(cstale(row.rtds_bnc_stale_ms))),
-            Span::styled(" CL-stale ", Style::default().fg(CGR)),
-            Span::styled(
-                format!("{}ms", row.rtds_cl_stale_ms),
-                Style::default().fg(cstale(row.rtds_cl_stale_ms))),
+            Span::styled(" Lat ", Style::default().fg(CGR)),
+            Span::styled("B:", Style::default().fg(CDIM)),
+            Span::styled(format!("{}ms", b_age), Style::default().fg(clat(b_age))),
+            Span::styled(" Y:", Style::default().fg(CDIM)),
+            Span::styled(format!("{}ms", py_age), Style::default().fg(clat(py_age))),
+            Span::styled(" N:", Style::default().fg(CDIM)),
+            Span::styled(format!("{}ms", pn_age), Style::default().fg(clat(pn_age))),
         ]),
     ];
 
     f.render_widget(
         Paragraph::new(lines)
-            .block(panel("FLOW · CVD · RTDS", CBD))
-            .style(Style::default().bg(CBG)),
-        area,
-    );
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// PANEL: Greeks + Fees + Latency
-// ═════════════════════════════════════════════════════════════════════════════
-fn render_greeks(f: &mut Frame, area: Rect, row: &Row) {
-    let b_age  = (row.now_ms - row.bnc_update_ms).clamp(0, MAX_SANE_LAT_MS);
-    let py_age = (row.now_ms - row.poly_yes_ms).clamp(0, MAX_SANE_LAT_MS);
-    let pn_age = (row.now_ms - row.poly_no_ms).clamp(0, MAX_SANE_LAT_MS);
-    let bvp_str = match sane_latency(row.bvp_delta_ms) {
-        Some(v) => format!("{:>+6}ms", v),
-        None    => " ~~~ ".into(),
-    };
-    let bvp_c    = sane_latency(row.bvp_delta_ms).map(|v| clat(v.abs())).unwrap_or(CGR);
-    let combined = row.yes_ask + row.no_ask;
-
-    let lines = vec![
-        Line::from(vec![Span::styled(" ─ GREEKS ─────────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" Δ ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.8}", row.delta),
-                Style::default().fg(CC).add_modifier(Modifier::BOLD)),
-            Span::styled(" Γ ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.8}", row.gamma), Style::default().fg(CW)),
-        ]),
-        Line::from(vec![
-            Span::styled(" ν ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.8}", row.vega),  Style::default().fg(CW)),
-            Span::styled(" Θ ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.8}", row.theta), Style::default().fg(cs(row.theta))),
-        ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ FEES ───────────────────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" YES ask ", Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.yes_ask), Style::default().fg(CW)),
-            Span::styled(format!(" fee {:.3}%", row.yes_fee), Style::default().fg(COR)),
-        ]),
-        Line::from(vec![
-            Span::styled(" NO ask ",  Style::default().fg(CGR)),
-            Span::styled(format!("{:.4}", row.no_ask),  Style::default().fg(CW)),
-            Span::styled(format!(" fee {:.3}%", row.no_fee),  Style::default().fg(COR)),
-        ]),
-        Line::from(vec![
-            Span::styled(" Combined", Style::default().fg(CGR)),
-            Span::styled(
-                format!(" {:.4}", combined),
-                Style::default().fg(if combined < 1.0 { CG } else { CR })
-                    .add_modifier(Modifier::BOLD)),
-            Span::styled(
-                if combined < 1.0 { " ✅ ARB" } else { "" },
-                Style::default().fg(CG).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::raw(""),
-        Line::from(vec![Span::styled(" ─ LATENCY (feed age) ─────────", Style::default().fg(CDIM))]),
-        Line::from(vec![
-            Span::styled(" Binance ",  Style::default().fg(CGR)),
-            Span::styled(lat_str(Some(b_age)), Style::default().fg(clat(b_age))),
-            Span::styled(" ago", Style::default().fg(CDIM)),
-        ]),
-        Line::from(vec![
-            Span::styled(" Poly YES ", Style::default().fg(CGR)),
-            Span::styled(lat_str(Some(py_age)), Style::default().fg(clat(py_age))),
-            Span::styled(" NO ",       Style::default().fg(CGR)),
-            Span::styled(lat_str(Some(pn_age)), Style::default().fg(clat(pn_age))),
-        ]),
-        Line::from(vec![
-            Span::styled(" B↔P Δ ",    Style::default().fg(CGR)),
-            Span::styled(bvp_str,       Style::default().fg(bvp_c)),
-        ]),
-        Line::from(vec![
-            Span::styled(" RTDS-B ",   Style::default().fg(CGR)),
-            Span::styled(format!("{:>5}ms", row.rtds_bnc_lag),
-                Style::default().fg(clat(row.rtds_bnc_lag))),
-            Span::styled(" CL ",       Style::default().fg(CGR)),
-            Span::styled(format!("{:>5}ms", row.rtds_cl_lag),
-                Style::default().fg(clat(row.rtds_cl_lag))),
-        ]),
-    ];
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(panel("GREEKS · FEES · LATENCY", CBD))
+            .block(panel("MARKET FLOW", CBD))
             .style(Style::default().bg(CBG)),
         area,
     );
@@ -1442,8 +1350,7 @@ fn render_greeks(f: &mut Frame, area: Rect, row: &Row) {
 // ═════════════════════════════════════════════════════════════════════════════
 // PANEL: Signal bar (bottom full-width)
 // ═════════════════════════════════════════════════════════════════════════════
-fn render_signals(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
-    // let sc  = csig(row.sig_score); 
+fn render_signal_bar(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     let sc  = WHITE;
     let lbl = if row.sig_score <= -4 { "STRONG BEAR" }
               else if row.sig_score <= -2 { "BEARISH" }
@@ -1452,18 +1359,21 @@ fn render_signals(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
               else if row.sig_score ==  1 { "LEAN BULL" }
               else if row.sig_score <=  3 { "BULLISH" }
               else { "STRONG BULL" };
-    // Map [-7, 7] → [0%, 100%] centered at 50%
     let pct = ((row.sig_score + 7) as f64 / 14.0 * 100.0) as u16;
     let oc  = match row.outcome.as_str() { "YES" => CG, "NO" => CR, _ => CGR };
-    let rc  = cregime(&row.regime);
     let c1  = hist.c1();
-    let c5  = hist.c5();
 
+    // Split: gauge 18% | metrics 52% | alerts 30%
     let hh = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(22), Constraint::Percentage(78)])
+        .constraints([
+            Constraint::Percentage(18),
+            Constraint::Percentage(52),
+            Constraint::Percentage(30),
+        ])
         .split(area);
 
+    // Signal gauge
     f.render_widget(
         Gauge::default()
             .block(panel("SIGNAL", CBD))
@@ -1476,198 +1386,51 @@ fn render_signals(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
         hh[0],
     );
 
+    // Key metrics (center)
     let detail = Line::from(vec![
         Span::styled(" OBI ",    Style::default().fg(CGR)),
         Span::styled(format!("{:+.1}%", row.obi * 100.0), Style::default().fg(cs(row.obi))),
-        Span::styled(" │ CVD1m ", Style::default().fg(CGR)),
+        Span::styled(" CVD ", Style::default().fg(CGR)),
         Span::styled(fmt_usd(c1), Style::default().fg(cs(c1))),
-        Span::styled(" 5m ",     Style::default().fg(CGR)),
-        Span::styled(fmt_usd(c5), Style::default().fg(cs(c5))),
-        Span::styled(" │ Z ",    Style::default().fg(CGR)),
-        Span::styled(
-            format!("{:+.3}→{}", row.z, row.z_dir),
-            Style::default().fg(czc(row.abs_z)).add_modifier(Modifier::BOLD)),
-        Span::styled(" Conf ",   Style::default().fg(CGR)),
-        Span::styled(
-            format!("{:.0}%", row.conf.score * 100.0),
-            Style::default().fg(cconf(row.conf.score))),
-        Span::styled(" │ Regime ", Style::default().fg(CGR)),
-        Span::styled(&row.regime, Style::default().fg(rc)),
         Span::styled(" │ ",      Style::default().fg(CDIM)),
         Span::styled(&row.outcome,
             Style::default().fg(oc).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)),
         Span::styled(
-            format!(" {:.0}% y:{:.4} n:{:.4}", row.out_conf * 100.0, row.yes_bid, row.no_bid),
+            format!(" {:.0}%", row.out_conf * 100.0),
             Style::default().fg(oc)),
         Span::styled(
             format!(" {} ${:.2}({:+.3}%)",
                 if row.dev_usd >= 0.0 { "▲" } else { "▼" },
                 row.dev_usd.abs(), row.dev_pct),
             Style::default().fg(cs(row.dev_usd)).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" EM ±{:.4}%", row.exp_move), Style::default().fg(CY)),
+        Span::styled(format!(" EM±{:.3}%", row.exp_move), Style::default().fg(CY)),
     ]);
 
     f.render_widget(
         Paragraph::new(vec![Line::raw(""), detail])
-            .block(panel("SIGNALS · OUTCOME", CBD))
+            .block(panel("SIGNALS", CBD))
             .style(Style::default().bg(CBG)),
         hh[1],
     );
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// v4.0: New rendering functions for Position Books, Timeline, Scoreboard, Alerts
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn render_position_books(f: &mut Frame, area: Rect, row: &Row) {
-    let h = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    // DN Book
-    let dn_info = vec![
-        Line::from(vec![
-            Span::raw("YES: "), Span::styled(format!("{} sh", row.dn_yes_shares), Style::default().fg(CG)),
-            Span::raw("  NO: "), Span::styled(format!("{} sh", row.dn_no_shares), Style::default().fg(CR)),
-        ]),
-        Line::from(vec![
-            Span::raw("Avg: "),
-            Span::styled(
-                format!("${:.3}", row.dn_combined_avg.unwrap_or(0.0)),
-                Style::default().fg(if row.dn_combined_avg.map(|v| v < 1.0).unwrap_or(false) { CG } else { COR }),
-            ),
-            if row.dn_ew { Span::styled(" ✓ EW", Style::default().fg(CG)) } else { Span::raw("") },
-            if row.dn_abandoned { Span::styled(" ⚠ ABANDONED", Style::default().fg(CR)) } else { Span::raw("") },
-        ]),
-        Line::from(vec![
-            Span::raw("Min PnL: "), Span::styled(format!("${:+.0}", row.dn_min_pnl), Style::default().fg(cs(row.dn_min_pnl))),
-            Span::raw("  Imbal: "), Span::styled(format!("{:.2}", row.dn_imbalance), Style::default().fg(if row.dn_imbalance > 0.7 { CY } else { CGR })),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(dn_info).block(panel("DN BOOK", CC)), h[0]);
-
-    // DIR Book
-    let dr_dir_str = row.dr_committed_dir.unwrap_or("—");
-    let dr_info = vec![
-        Line::from(vec![
-            Span::raw("Dir: "), Span::styled(dr_dir_str, Style::default().fg(if dr_dir_str == "YES" { CG } else if dr_dir_str == "NO" { CR } else { CGR })),
-            Span::raw("  YES: "), Span::styled(format!("{}", row.dr_yes_shares), Style::default().fg(CG)),
-            Span::raw("  NO: "), Span::styled(format!("{}", row.dr_no_shares), Style::default().fg(CR)),
-        ]),
-        Line::from(vec![
-            if row.dr_frozen { Span::styled("FROZEN ⚠", Style::default().fg(CR)) } else { Span::raw("Active") },
-            Span::raw("  Flips: "), Span::styled(format!("{}", row.dr_post_flip_count), Style::default().fg(if row.dr_post_flip_count > 2 { CY } else { CGR })),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(dr_info).block(panel("DIR BOOK", CTL)), h[1]);
-}
-
-fn render_risk_monitor(f: &mut Frame, area: Rect, row: &Row) {
-    // Capital gauge
-    let cap_pct = if row.max_exposure > 0.0 { (row.total_exposure / row.max_exposure * 100.0).min(100.0) } else { 0.0 };
-    let cap_color = if cap_pct < 60.0 { CG } else if cap_pct < 80.0 { CY } else if cap_pct < 95.0 { COR } else { CR };
-
-    let gauge = Gauge::default()
-        .block(panel("CAPITAL", cap_color))
-        .gauge_style(Style::default().fg(cap_color))
-        .percent(cap_pct as u16)
-        .label(format!("{:.0}% (${:.0}/${:.0})", cap_pct, row.total_exposure, row.max_exposure));
-
-    f.render_widget(gauge, area);
-}
-
-// fn render_trade_timeline(f: &mut Frame, area: Rect, row: &Row) {
-//     let trades = row.recent_trades.iter().rev().take(8).collect::<Vec<_>>();
-//     let lines: Vec<Line> = trades.iter().map(|t| {
-//         let tag_str = t.exploit_tags.iter().map(|tag| tag.badge()).collect::<String>();
-//         Line::from(vec![
-//             Span::styled(format!("{:3}", t.tick), Style::default().fg(CGR)),
-//             Span::raw(" "),
-//             Span::styled(t.book, Style::default().fg(if t.book == "DN" { CC } else { CTL })),
-//             Span::raw(" "),
-//             Span::styled(t.trade_class.label(), Style::default().fg(t.trade_class.color())),
-//             Span::raw(" "),
-//             Span::styled(t.side, Style::default().fg(if t.side == "YES" { CG } else { CR })),
-//             Span::raw(" "),
-//             Span::styled(format!("{}sh", t.shares), Style::default().fg(CW)),
-//             Span::raw(" @ "),
-//             Span::styled(format!("${:.3}", t.price), Style::default().fg(CW)),
-//             Span::raw(" "),
-//             Span::styled(tag_str, Style::default().fg(CGD).add_modifier(Modifier::BOLD)),
-//         ])
-//     }).collect();
-
-//     f.render_widget(
-//         Paragraph::new(lines).block(panel("TIMELINE", CW)),
-//         area,
-//     );
-// }
-
-// fn render_exploit_scoreboard(f: &mut Frame, area: Rect, row: &Row) {
-//     let h = Layout::default()
-//         .direction(Direction::Horizontal)
-//         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-//         .split(area);
-
-//     let v1 = Layout::default()
-//         .direction(Direction::Vertical)
-//         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-//         .split(h[0]);
-
-//     let v2 = Layout::default()
-//         .direction(Direction::Vertical)
-//         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-//         .split(h[1]);
-
-//     // Exploit 1: Snipe
-//     let snipe_total = row.snipe_dn_trades + row.snipe_dir_trades;
-//     let snipe_avg = if snipe_total > 0 { row.snipe_edge_sum_bps / snipe_total as f64 } else { 0.0 };
-//     let snipe_info = vec![
-//         Line::from(format!("Passed: {}", snipe_total)),
-//         Line::from(format!("Blocked: {}", row.snipe_blocked)),
-//         Line::from(format!("Edge sum: {:.1} bps", row.snipe_edge_sum_bps)),
-//         Line::from(format!("Avg/trade: {:.2} bps", snipe_avg)),
-//     ];
-//     f.render_widget(Paragraph::new(snipe_info).block(panel("1. SNIPE", CG)), v1[0]);
-
-//     // Exploit 2: Edge Scale
-//     let edge_info = vec![
-//         Line::from(format!("Trades: {}", row.edge_scaled_trades)),
-//         Line::from(format!("Avg scale: {:.2}×", row.edge_avg_scale)),
-//         Line::from(format!("Amplified: {:.0}%", (row.edge_avg_scale - 1.0) * 100.0)),
-//     ];
-//     f.render_widget(Paragraph::new(edge_info).block(panel("2. EDGE", CY)), v1[1]);
-
-//     // Exploit 3: Gate
-//     let gate_total = row.exploit3_dn_gated + row.exploit3_dir_gated;
-//     let gate_info = vec![
-//         Line::from(format!("Blocked: {}", gate_total)),
-//         Line::from(format!("DN: {} DIR: {}", row.exploit3_dn_gated, row.exploit3_dir_gated)),
-//     ];
-//     f.render_widget(Paragraph::new(gate_info).block(panel("3. GATE", COR)), v2[0]);
-
-//     // Exploit 4: Chainlink Arb (ONLY ONE WITH PROFIT)
-//     let cl_info = vec![
-//         Line::from(format!("Trades: {}", row.chainlink_arb_trades)),
-//         Line::from(format!("Profit: ${:+.2}", row.chainlink_arb_profit)),
-//         Line::from(format!("ROI: {:.1}%", row.chainlink_arb_roi)),
-//     ];
-//     f.render_widget(Paragraph::new(cl_info).block(panel("4. CHAINLINK", CGD)), v2[1]);
-// }
-
-fn render_alerts(f: &mut Frame, area: Rect, row: &Row) {
-    let alert_lines: Vec<Line> = row.alerts.iter().take(5).map(|a| {
-        Line::from(vec![
-            Span::styled(a.severity.label(), Style::default().fg(a.severity.color())),
-            Span::raw(" "),
-            Span::styled(&a.message, Style::default().fg(a.severity.color())),
-        ])
-    }).collect();
-
+    // Alerts (right)
+    let has_crit = row.alerts.iter().any(|a| a.severity == AlertSeverity::Critical);
+    let alert_lines: Vec<Line> = if row.alerts.is_empty() {
+        vec![Line::from(Span::styled(" No alerts", Style::default().fg(CGR)))]
+    } else {
+        row.alerts.iter().take(2).map(|a| {
+            Line::from(vec![
+                Span::styled(a.severity.label(), Style::default().fg(a.severity.color())),
+                Span::raw(" "),
+                Span::styled(&a.message, Style::default().fg(a.severity.color())),
+            ])
+        }).collect()
+    };
     f.render_widget(
-        Paragraph::new(alert_lines).block(panel("ALERTS", if row.alerts.iter().any(|a| a.severity == AlertSeverity::Critical) { CR } else { CY })),
-        area,
+        Paragraph::new(alert_lines)
+            .block(panel("ALERTS", if has_crit { CR } else { CBD }))
+            .style(Style::default().bg(CBG)),
+        hh[2],
     );
 }
 
@@ -1682,8 +1445,8 @@ fn draw(f: &mut Frame, row: &Row, hist: &History) {
             Constraint::Length(4),   // header
             Constraint::Length(1),   // TTX gauge
             Constraint::Length(3),   // z-score panel
-            Constraint::Min(28),     // body
-            Constraint::Length(3),   // signal bar
+            Constraint::Min(10),     // body: 3-column
+            Constraint::Length(3),   // signal + alerts bar
         ])
         .split(area);
 
@@ -1692,41 +1455,18 @@ fn draw(f: &mut Frame, row: &Row, hist: &History) {
     render_zscore(f, v[2], row);
 
     let body = Layout::default()
-        .direction(Direction::Vertical)
+        .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(4),   // position books
-            Constraint::Length(4),   // exploit scoreboard
-            Constraint::Min(10),     // body (existing: book, dist, flow, greeks)
-            Constraint::Length(3),   // alerts
+            Constraint::Percentage(33),  // order book
+            Constraint::Percentage(34),  // distribution chart
+            Constraint::Percentage(33),  // market flow
         ])
         .split(v[3]);
 
-    // New v4.0 panels
-    render_position_books(f, body[0], row);
-    // render_exploit_scoreboard(f, body[1], row);
-    render_alerts(f, body[3], row);
-
-    // Existing panels (reorganized)
-    let main_body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(body[2]);
-
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(8)])
-        .split(main_body[0]);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(main_body[1]);
-
-    render_book(f, left[0], row);
-    render_dist_chart(f, left[1], row, hist);
-    render_flow(f, right[0], row, hist);
-    render_greeks(f, right[1], row);
-    render_signals(f, v[4], row, hist);
+    render_book(f, body[0], row);
+    render_dist_chart(f, body[1], row, hist);
+    render_market_flow(f, body[2], row, hist);
+    render_signal_bar(f, v[4], row, hist);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1856,6 +1596,44 @@ async fn main() -> Result<()> {
             (g.delta - 0.5).abs() * 2.0
         };
 
+        // --- Order Book Depth ---
+        let yes_bid_depth_3 = yes_p.as_ref().map(|p| p.bid_depth_3).unwrap_or(0.0);
+        let yes_ask_depth_3 = yes_p.as_ref().map(|p| p.ask_depth_3).unwrap_or(0.0);
+        let no_bid_depth_3 = no_p.as_ref().map(|p| p.bid_depth_3).unwrap_or(0.0);
+        let no_ask_depth_3 = no_p.as_ref().map(|p| p.ask_depth_3).unwrap_or(0.0);
+        let yes_bid_depth_all = yes_p.as_ref().map(|p| p.bid_depth_all).unwrap_or(0.0);
+        let yes_ask_depth_all = yes_p.as_ref().map(|p| p.ask_depth_all).unwrap_or(0.0);
+        let no_bid_depth_all = no_p.as_ref().map(|p| p.bid_depth_all).unwrap_or(0.0);
+        let no_ask_depth_all = no_p.as_ref().map(|p| p.ask_depth_all).unwrap_or(0.0);
+        let yes_bid_levels = yes_p.as_ref().map(|p| p.bid_levels_count).unwrap_or(0);
+        let yes_ask_levels = yes_p.as_ref().map(|p| p.ask_levels_count).unwrap_or(0);
+        let no_bid_levels = no_p.as_ref().map(|p| p.bid_levels_count).unwrap_or(0);
+        let no_ask_levels = no_p.as_ref().map(|p| p.ask_levels_count).unwrap_or(0);
+        let yes_book_imbalance = yes_p.as_ref().map(|p| p.book_imbalance).unwrap_or(0.0);
+        let no_book_imbalance = no_p.as_ref().map(|p| p.book_imbalance).unwrap_or(0.0);
+        let all_bids = yes_bid_depth_all + no_bid_depth_all;
+        let all_asks = yes_ask_depth_all + no_ask_depth_all;
+        let combined_depth_obi = if (all_bids + all_asks) > 0.0 {
+            (all_bids - all_asks) / (all_bids + all_asks)
+        } else { 0.0 };
+
+        // --- Trade Flow ---
+        let yes_last_trade_price = yes_p.as_ref().map(|p| p.last_trade_price).unwrap_or(0.0);
+        let yes_last_trade_size = yes_p.as_ref().map(|p| p.last_trade_size).unwrap_or(0.0);
+        let yes_last_trade_side = yes_p.as_ref().map(|p| p.last_trade_side.clone()).unwrap_or_default();
+        let no_last_trade_price = no_p.as_ref().map(|p| p.last_trade_price).unwrap_or(0.0);
+        let no_last_trade_size = no_p.as_ref().map(|p| p.last_trade_size).unwrap_or(0.0);
+        let no_last_trade_side = no_p.as_ref().map(|p| p.last_trade_side.clone()).unwrap_or_default();
+        let yes_taker_buy = yes_p.as_ref().map(|p| p.taker_buy_volume).unwrap_or(0.0);
+        let yes_taker_sell = yes_p.as_ref().map(|p| p.taker_sell_volume).unwrap_or(0.0);
+        let no_taker_buy = no_p.as_ref().map(|p| p.taker_buy_volume).unwrap_or(0.0);
+        let no_taker_sell = no_p.as_ref().map(|p| p.taker_sell_volume).unwrap_or(0.0);
+        let total_buy = yes_taker_buy + no_taker_buy;
+        let total_sell = yes_taker_sell + no_taker_sell;
+        let trade_flow_imbalance = if (total_buy + total_sell) > 0.0 {
+            (total_buy - total_sell) / (total_buy + total_sell)
+        } else { 0.0 };
+
         let mut row = Row {
             ts:           now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
             slug:         market.slug.clone(),
@@ -1923,39 +1701,23 @@ async fn main() -> Result<()> {
             cvd5m:  hist.c5(),
             sig_score: 0,
 
-            // v4.0: Position Books (initialized to default)
-            dn_yes_shares: 0,
-            dn_no_shares: 0,
-            dn_combined_avg: None,
-            dn_ew: false,
-            dn_abandoned: false,
-            dn_imbalance: 0.0,
-            dn_min_pnl: 0.0,
-            dr_yes_shares: 0,
-            dr_no_shares: 0,
-            dr_committed_dir: None,
-            dr_frozen: false,
-            dr_post_flip_count: 0,
-            total_exposure: 0.0,
-            max_exposure: 200.0,
+            // L2 orderbook depth
+            yes_bid_depth_3, yes_ask_depth_3,
+            no_bid_depth_3, no_ask_depth_3,
+            yes_bid_depth_all, yes_ask_depth_all,
+            no_bid_depth_all, no_ask_depth_all,
+            yes_bid_levels, yes_ask_levels,
+            no_bid_levels, no_ask_levels,
+            yes_book_imbalance, no_book_imbalance,
+            combined_depth_obi,
 
-            // v4.0: Trade Timeline
-            recent_trades: VecDeque::new(),
+            // Trade flow
+            yes_last_trade_price, yes_last_trade_size,
+            yes_last_trade_side,
+            no_last_trade_price, no_last_trade_size,
+            no_last_trade_side,
+            trade_flow_imbalance,
 
-            // v4.0: Exploit Metrics
-            snipe_dn_trades: 0,
-            snipe_dir_trades: 0,
-            snipe_blocked: 0,
-            snipe_edge_sum_bps: 0.0,
-            edge_scaled_trades: 0,
-            edge_avg_scale: 1.0,
-            exploit3_dn_gated: 0,
-            exploit3_dir_gated: 0,
-            chainlink_arb_trades: 0,
-            chainlink_arb_profit: 0.0,
-            chainlink_arb_roi: 0.0,
-
-            // v4.0: Risk Alerts
             alerts: Vec::new(),
         };
         row.sig_score = calc_signal(&row);
