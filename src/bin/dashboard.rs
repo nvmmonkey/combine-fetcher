@@ -43,8 +43,6 @@ use combine_fetcher::{
 // ─────────────────────────────────────────────────────────────────────────────
 const RTDS_ADV_THRESH: f64  = 3.0;
 const MAX_SANE_LAT_MS: i64  = 10_000;
-const DIST_X_MIN: f64       = -4.0;
-const DIST_X_MAX: f64       = 4.0;
 const Z_HIST_LEN: usize     = 500;
 const PRICE_HIST_LEN: usize = 200;
 /// Approximate tick rate (ticks/sec). Used to normalise per-tick CVD increments
@@ -573,6 +571,8 @@ struct History {
     cvd_1m:      VecDeque<(i64, f64)>,
     cvd_3m:      VecDeque<(i64, f64)>,
     cvd_5m:      VecDeque<(i64, f64)>,
+    max_pos_z:   f64,
+    max_neg_z:   f64,
 }
 
 impl History {
@@ -587,6 +587,8 @@ impl History {
         // Z-score history
         self.z_hist.push_back(z);
         if self.z_hist.len() > Z_HIST_LEN { self.z_hist.pop_front(); }
+        if z > self.max_pos_z { self.max_pos_z = z; }
+        if z < self.max_neg_z { self.max_neg_z = z; }
         self.z_dir_hist.push_back(is_yes);
         if self.z_dir_hist.len() > Z_HIST_LEN { self.z_dir_hist.pop_front(); }
         if let Some(p) = self.prev_z_dir {
@@ -626,6 +628,13 @@ impl History {
         else { self.above_count as f64 / self.tick_count as f64 }
     }
 
+    /// Stable display range for z-distribution chart.
+    /// Defaults to 3σ, expands if we've ever seen bigger. Never shrinks.
+    fn z_display_range(&self) -> f64 {
+        let max_abs = self.max_pos_z.abs().max(self.max_neg_z.abs());
+        (max_abs + 1.0).max(3.0)
+    }
+
     /// Last N z-scores as Vec for dist chart
     fn z_vec(&self, n: usize) -> Vec<f64> {
         let len   = self.z_hist.len();
@@ -653,24 +662,21 @@ fn calc_obi(
 
 fn calc_signal(r: &Row) -> i32 {
     let mut s: i32 = 0;
+    let is_yes = r.z_dir == "YES";
 
-    // OBI: positive OBI = more bids = bullish
-    if r.obi < -0.3 { s -= 2; } else if r.obi > 0.3 { s += 2; }
+    // Z-score direction (+/- 2 pts): strong directional conviction
+    if r.abs_z >= 2.0 { s += if is_yes { 2 } else { -2 }; }
+    else if r.abs_z >= 1.0 { s += if is_yes { 1 } else { -1 }; }
 
-    // CVD 5m: positive = net buying pressure
-    if r.cvd5m < -50_000.0 { s -= 2; } else if r.cvd5m > 50_000.0 { s += 2; }
+    // OBI (+/- 2 pts): tiered order book imbalance
+    if r.obi > 0.05 { s += 1; } else if r.obi < -0.05 { s -= 1; }
+    if r.obi > 0.15 { s += 1; } else if r.obi < -0.15 { s -= 1; }
 
-    // FIX 4 (was: vol MACD): use price momentum instead.
-    //   Positive price movement (btc rose since last tick) = bullish.
-    let price_mom = r.btc - r.btc_prev;
-    if price_mom < -1.0 { s -= 1; } else if price_mom > 1.0 { s += 1; }
+    // CVD 1m (+/- 1 pt): short-term net buying pressure
+    if r.cvd1m > 100.0 { s += 1; } else if r.cvd1m < -100.0 { s -= 1; }
 
-    // FIX 5: btc > strike means YES is winning => BULLISH (+1).
-    //   Was incorrectly { s -= 1 } (inverted).
-    if r.btc > r.strike      { s += 1; } else if r.btc < r.strike { s -= 1; }
-
-    // Price direction tick-over-tick
-    if r.btc < r.btc_prev    { s -= 1; } else if r.btc > r.btc_prev { s += 1; }
+    // RTDS staleness (+/- 1 pt): confirmed Binance move that Poly hasn't priced in
+    if r.rtds_stale { s += if is_yes { 1 } else { -1 }; }
 
     s.clamp(-7, 7)
 }
@@ -712,12 +718,12 @@ fn gauss(x: f64, mu: f64, sigma: f64) -> f64 {
 
 /// Build bar fill matrix[row][col] = 0..8
 /// Row 0 = top, row (chart_h-1) = bottom
-fn build_bar_matrix(n_cols: usize, chart_h: usize, mu: f64, sigma: f64) -> Vec<Vec<u8>> {
-    let x_range = DIST_X_MAX - DIST_X_MIN;
+fn build_bar_matrix(n_cols: usize, chart_h: usize, mu: f64, sigma: f64, x_min: f64, x_max: f64) -> Vec<Vec<u8>> {
+    let x_range = x_max - x_min;
     let units   = chart_h * 8;
     let mut mat = vec![vec![0u8; n_cols]; chart_h];
     for col in 0..n_cols {
-        let x      = DIST_X_MIN + (col as f64 / (n_cols - 1).max(1) as f64) * x_range;
+        let x      = x_min + (col as f64 / (n_cols - 1).max(1) as f64) * x_range;
         let h      = gauss(x, mu, sigma);
         let filled = (h * units as f64).round() as usize;
         for row in 0..chart_h {
@@ -796,7 +802,7 @@ fn render_dist_chart(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     // Display range expands to show extreme z-scores in the tails
     let mu    = row.z;
     let sigma = 1.0_f64;
-    let display_range = (row.abs_z + 2.0).max(4.0);  // Show z-score with 2σ margin
+    let display_range = hist.z_display_range();
     let x_min = -display_range;
     let x_max = display_range;
     let x_range = x_max - x_min;
@@ -818,7 +824,7 @@ fn render_dist_chart(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
         }
     } else { (CY, CGR) };
 
-    let mat = build_bar_matrix(n_cols, chart_h, mu, sigma);
+    let mat = build_bar_matrix(n_cols, chart_h, mu, sigma, x_min, x_max);
 
     // ── Row 0: annotation ─────────────────────────────────────────────────
     let rc         = cregime(&row.regime);
@@ -1416,7 +1422,7 @@ fn render_signal_bar(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     f.render_widget(
         Gauge::default()
             .block(panel("SIGNAL", CBD))
-            .gauge_style(Style::default().fg(sc).bg(CBG2))
+            .gauge_style(Style::default().fg(oc).bg(CBG2))
             .percent(pct)
             .label(Span::styled(
                 format!(" {lbl} ({:+}/7) ", row.sig_score),
@@ -1446,7 +1452,7 @@ fn render_signal_bar(f: &mut Frame, area: Rect, row: &Row, hist: &History) {
     ]);
 
     f.render_widget(
-        Paragraph::new(vec![Line::raw(""), detail])
+        Paragraph::new(vec![detail])
             .block(panel("SIGNALS", CBD))
             .style(Style::default().bg(CBG)),
         hh[1],
@@ -1675,6 +1681,38 @@ async fn main() -> Result<()> {
             (total_buy - total_sell) / (total_buy + total_sell)
         } else { 0.0 };
 
+        // Pre-compute values needed for both alerts and Row fields
+        let regime_str = classify_regime(y_ask).to_string();
+        let rtds_adv_bps = rtds_s.rtds_price_advantage_bps;
+        let rtds_stale = rtds_adv_bps >= RTDS_ADV_THRESH && rtds_adv_bps < 50.0;
+
+        // Generate alerts
+        let mut alerts = Vec::new();
+        if regime_str.contains("EXTREME") {
+            alerts.push(RiskAlert {
+                severity: AlertSeverity::Warning,
+                message: format!("Regime: {regime_str}"),
+            });
+        }
+        if abs_z >= 3.0 {
+            alerts.push(RiskAlert {
+                severity: AlertSeverity::Critical,
+                message: format!("Z-score extreme: {z:.2}"),
+            });
+        }
+        if rtds_stale && rtds_adv_bps.abs() > 3.0 {
+            alerts.push(RiskAlert {
+                severity: AlertSeverity::Info,
+                message: format!("RTDS stale edge: {rtds_adv_bps:.1}bp"),
+            });
+        }
+        if hist.z_flipped {
+            alerts.push(RiskAlert {
+                severity: AlertSeverity::Warning,
+                message: "Z-score flipped".to_string(),
+            });
+        }
+
         let mut row = Row {
             ts:           now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
             slug:         market.slug.clone(),
@@ -1710,7 +1748,7 @@ async fn main() -> Result<()> {
             exp_move_usd: strike * em_pct / 100.0,
             dev_usd:      snap.spot_price - strike,
             dev_pct:      (snap.spot_price - strike) / strike * 100.0,
-            regime:       classify_regime(y_ask).to_string(),
+            regime:       regime_str,
             time_pct:     1.0 - (ttx / 15.0).clamp(0.0, 1.0),
             pct_above:    hist.pct_above(),
             conf,
@@ -1724,10 +1762,9 @@ async fn main() -> Result<()> {
             vol_regime:   snap.volatility_regime.clone(),
             sig_quality:  snap.signal_quality.clone(),
             sig_conf:     snap.trade_confidence,
-            rtds_adv:     rtds_s.rtds_price_advantage_bps,
+            rtds_adv:     rtds_adv_bps,
             rtds_cl_dev:  rtds_s.rtds_chainlink_dev_bps,
-            rtds_stale:   rtds_s.rtds_price_advantage_bps >= RTDS_ADV_THRESH
-                          && rtds_s.rtds_price_advantage_bps < 50.0,
+            rtds_stale,
             rtds_bnc_lag:     rtds_s.rtds_binance_lag_ms,
             rtds_cl_lag:      rtds_s.rtds_chainlink_lag_ms,
             rtds_bnc_stale_ms: rtds_s.rtds_binance_stale_ms,
@@ -1769,7 +1806,7 @@ async fn main() -> Result<()> {
             no_last_trade_side,
             trade_flow_imbalance,
 
-            alerts: Vec::new(),
+            alerts,
         };
         row.sig_score = calc_signal(&row);
 
