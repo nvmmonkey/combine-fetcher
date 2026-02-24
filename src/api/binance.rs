@@ -135,6 +135,14 @@ struct BinanceDepthEvent {
     asks: Vec<[String; 2]>,
 }
 
+/// Combined stream wrapper from /stream?streams= endpoint
+/// Format: {"stream":"btcusdt@depth20@100ms","data":{...}}
+#[derive(Debug, Deserialize)]
+struct CombinedDepthMessage {
+    stream: String,
+    data: BinanceDepthEvent,
+}
+
 /// Processed Binance depth data (thread-safe snapshot)
 #[derive(Debug, Clone, Default)]
 pub struct BinanceDepthData {
@@ -585,13 +593,17 @@ impl BinanceDataManager {
         });
 
         // Build depth streams URL (3rd connection)
+        // Use /stream?streams= combined endpoint so each message includes the stream name.
+        // depth20 payloads have no symbol field (unlike bookTicker/aggTrade),
+        // so we need the wrapper to route messages to the correct symbol.
         let depth_url = {
             let streams: Vec<String> = self
                 .symbols
                 .iter()
                 .map(|s| format!("{}@depth20@100ms", s.to_lowercase()))
                 .collect();
-            format!("{}/{}", self.ws_url, streams.join("/"))
+            let base = self.ws_url.replace("/ws", "/stream");
+            format!("{}?streams={}", base, streams.join("/"))
         };
 
         info!("Connecting to Binance WebSocket (depth): {}", depth_url);
@@ -1058,9 +1070,8 @@ impl BinanceDataManager {
         let mut reconnect_delay = tokio::time::Duration::from_secs(1);
         const MAX_RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(30);
 
-        // For single-symbol streams, the depth payload has no symbol field,
-        // so we need to know which symbol this connection handles
-        let symbol = symbols.first().cloned().unwrap_or_default();
+        // Fallback for single-symbol connections (without combined stream wrapper)
+        let fallback_symbol = symbols.first().cloned().unwrap_or_default();
 
         loop {
             // Check if another task is already reconnecting
@@ -1091,9 +1102,18 @@ impl BinanceDataManager {
                     while let Some(msg_result) = ws_receiver.next().await {
                         match msg_result {
                             Ok(Message::Text(text)) => {
-                                if let Err(e) =
-                                    Self::handle_depth_message(&text, &depth_data, &symbol).await
-                                {
+                                // Combined stream format: {"stream":"btcusdt@depth20@100ms","data":{...}}
+                                // Extract symbol from stream name since depth20 payloads have no symbol field
+                                if let Ok(combined) = serde_json::from_str::<CombinedDepthMessage>(&text) {
+                                    let symbol = combined.stream
+                                        .split('@')
+                                        .next()
+                                        .unwrap_or("")
+                                        .to_uppercase();
+                                    if let Err(e) = Self::handle_depth_event(combined.data, &depth_data, &symbol).await {
+                                        warn!("Failed to process depth for {}: {}", symbol, e);
+                                    }
+                                } else if let Err(e) = Self::handle_depth_message(&text, &depth_data, &fallback_symbol).await {
                                     warn!("Failed to parse depth message: {}", e);
                                 }
                             }
@@ -1294,7 +1314,7 @@ impl BinanceDataManager {
         Ok(())
     }
 
-    /// Handle incoming partial book depth WebSocket message
+    /// Handle incoming partial book depth WebSocket message (raw JSON string)
     async fn handle_depth_message(
         text: &str,
         depth_data: &Arc<RwLock<HashMap<String, BinanceDepthData>>>,
@@ -1302,7 +1322,15 @@ impl BinanceDataManager {
     ) -> Result<()> {
         let event: BinanceDepthEvent =
             serde_json::from_str(text).map_err(|e| anyhow!("Failed to parse depth: {}", e))?;
+        Self::handle_depth_event(event, depth_data, symbol).await
+    }
 
+    /// Process a pre-parsed depth event (used by both raw and combined stream paths)
+    async fn handle_depth_event(
+        event: BinanceDepthEvent,
+        depth_data: &Arc<RwLock<HashMap<String, BinanceDepthData>>>,
+        symbol: &str,
+    ) -> Result<()> {
         let upper_symbol = symbol.to_uppercase();
 
         // Parse and sum bid depths
