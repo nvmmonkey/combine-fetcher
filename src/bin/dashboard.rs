@@ -537,6 +537,13 @@ struct Row {
     yes_book_imbalance: f64, no_book_imbalance: f64,
     combined_depth_obi: f64,
 
+    // Binance L2 orderbook depth
+    bnc_bid_depth_3: f64, bnc_ask_depth_3: f64,
+    bnc_bid_depth_all: f64, bnc_ask_depth_all: f64,
+    bnc_bid_levels: u16, bnc_ask_levels: u16,
+    bnc_book_imbalance: f64,
+    bnc_poly_obi_div: f64,
+
     // Trade flow
     yes_last_trade_price: f64, yes_last_trade_size: f64,
     yes_last_trade_side: String,
@@ -1216,6 +1223,15 @@ fn render_book(f: &mut Frame, area: Rect, row: &Row) {
     ]));
 
     // ── BINANCE ──
+    let bnc_max_d3 = row.bnc_bid_depth_3.max(row.bnc_ask_depth_3).max(1.0);
+    let bnc_obi_c = if row.bnc_book_imbalance > 0.1 { CG }
+                     else if row.bnc_book_imbalance < -0.1 { CR }
+                     else { CGR };
+    let div_abs = row.bnc_poly_obi_div.abs();
+    let div_c = if div_abs > 0.20 { COR }
+                else if div_abs > 0.10 { CY }
+                else { CGR };
+
     lines.push(Line::from(vec![Span::styled(" ─ BINANCE ─────────────", Style::default().fg(CDIM))]));
     lines.push(Line::from(vec![
         Span::styled(" B ", Style::default().fg(CGR)),
@@ -1224,6 +1240,29 @@ fn render_book(f: &mut Frame, area: Rect, row: &Row) {
         Span::styled(format!("${:.2}", row.bnc_ask),   Style::default().fg(CR)),
         Span::styled(format!(" {:.1}bp", row.bnc_spr_bps), Style::default().fg(CY)),
     ]));
+    // Binance depth bar (top 3 levels)
+    let mut bd3_line = vec![Span::styled(" 3L ", Style::default().fg(CGR))];
+    bd3_line.extend(depth_bar(row.bnc_bid_depth_3, bnc_max_d3, 8, CG));
+    bd3_line.push(Span::styled("│", Style::default().fg(CDIM)));
+    bd3_line.extend(depth_bar(row.bnc_ask_depth_3, bnc_max_d3, 8, CR));
+    bd3_line.push(Span::styled(
+        format!(" {:.0}/{:.0} {}L/{}L", row.bnc_bid_depth_3, row.bnc_ask_depth_3, row.bnc_bid_levels, row.bnc_ask_levels),
+        Style::default().fg(CGR)));
+    lines.push(Line::from(bd3_line));
+    // Binance OBI + divergence
+    let mut bobi_line = vec![Span::styled(" OBI", Style::default().fg(CGR))];
+    bobi_line.extend(imbalance_bar(row.bnc_book_imbalance, 16));
+    bobi_line.push(Span::styled(
+        format!("{:+.0}%", row.bnc_book_imbalance * 100.0),
+        Style::default().fg(bnc_obi_c).add_modifier(Modifier::BOLD)));
+    bobi_line.push(Span::styled(" Δ", Style::default().fg(CDIM)));
+    bobi_line.push(Span::styled(
+        format!("{:+.0}%", row.bnc_poly_obi_div * 100.0),
+        Style::default().fg(div_c).add_modifier(if div_abs > 0.10 { Modifier::BOLD } else { Modifier::empty() })));
+    if div_abs > 0.10 {
+        bobi_line.push(Span::styled(" ⚡", Style::default().fg(COR)));
+    }
+    lines.push(Line::from(bobi_line));
 
     f.render_widget(
         Paragraph::new(lines)
@@ -1544,6 +1583,8 @@ async fn main() -> Result<()> {
         let no_p   = poly.get_prices(&market.no_token_id);
         let (b_bid, b_ask) = bnc.get_bid_ask("BTCUSDT").await
             .unwrap_or((snap.spot_price, snap.spot_price));
+        let bnc_depth = bnc.get_depth_data("BTCUSDT").await
+            .unwrap_or_default();
 
         let ttx      = ((market.window_end - now_s) as f64 / 60.0).max(0.0);
         let resolved = ttx <= 0.0;
@@ -1710,6 +1751,16 @@ async fn main() -> Result<()> {
             no_bid_levels, no_ask_levels,
             yes_book_imbalance, no_book_imbalance,
             combined_depth_obi,
+
+            // Binance L2 orderbook depth
+            bnc_bid_depth_3:    bnc_depth.bid_depth_3,
+            bnc_ask_depth_3:    bnc_depth.ask_depth_3,
+            bnc_bid_depth_all:  bnc_depth.bid_depth_all,
+            bnc_ask_depth_all:  bnc_depth.ask_depth_all,
+            bnc_bid_levels:     bnc_depth.bid_levels,
+            bnc_ask_levels:     bnc_depth.ask_levels,
+            bnc_book_imbalance: bnc_depth.book_imbalance,
+            bnc_poly_obi_div:   bnc_depth.book_imbalance - combined_depth_obi,
 
             // Trade flow
             yes_last_trade_price, yes_last_trade_size,
