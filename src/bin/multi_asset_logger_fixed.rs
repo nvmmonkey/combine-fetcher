@@ -112,6 +112,42 @@ pub struct CsvRecord {
     pub rtds_chainlink_lag_ms: i64,
     pub rtds_binance_stale_ms: i64,
     pub rtds_chainlink_stale_ms: i64,
+
+    // === ORDER BOOK DEPTH (from Polymarket BOOK_STREAM) ===
+    pub yes_bid_depth_3: f64,
+    pub yes_ask_depth_3: f64,
+    pub no_bid_depth_3: f64,
+    pub no_ask_depth_3: f64,
+    pub yes_bid_depth_all: f64,
+    pub yes_ask_depth_all: f64,
+    pub no_bid_depth_all: f64,
+    pub no_ask_depth_all: f64,
+    pub yes_bid_levels: u16,
+    pub yes_ask_levels: u16,
+    pub no_bid_levels: u16,
+    pub no_ask_levels: u16,
+    pub yes_book_imbalance: f64,
+    pub no_book_imbalance: f64,
+    pub combined_obi: f64,
+
+    // === TRADE FLOW (from Polymarket TRADE_STREAM) ===
+    pub yes_last_trade_price: f64,
+    pub yes_last_trade_size: f64,
+    pub yes_last_trade_side: String,
+    pub no_last_trade_price: f64,
+    pub no_last_trade_size: f64,
+    pub no_last_trade_side: String,
+    pub trade_flow_imbalance: f64,
+
+    // === BINANCE L2 DEPTH (from Binance depth20@100ms stream) ===
+    pub binance_bid_depth_3: f64,
+    pub binance_ask_depth_3: f64,
+    pub binance_bid_depth_all: f64,
+    pub binance_ask_depth_all: f64,
+    pub binance_bid_levels: u16,
+    pub binance_ask_levels: u16,
+    pub binance_book_imbalance: f64,
+    pub binance_poly_obi_divergence: f64,
 }
 
 impl CsvRecord {
@@ -130,7 +166,18 @@ impl CsvRecord {
         rtds_binance_dev_bps,rtds_chainlink_dev_bps,\
         rtds_price_advantage_bps,rtds_chainlink_binance_spread_bps,\
         rtds_binance_lag_ms,rtds_chainlink_lag_ms,\
-        rtds_binance_stale_ms,rtds_chainlink_stale_ms"
+        rtds_binance_stale_ms,rtds_chainlink_stale_ms,\
+        yes_bid_depth_3,yes_ask_depth_3,no_bid_depth_3,no_ask_depth_3,\
+        yes_bid_depth_all,yes_ask_depth_all,no_bid_depth_all,no_ask_depth_all,\
+        yes_bid_levels,yes_ask_levels,no_bid_levels,no_ask_levels,\
+        yes_book_imbalance,no_book_imbalance,combined_obi,\
+        yes_last_trade_price,yes_last_trade_size,yes_last_trade_side,\
+        no_last_trade_price,no_last_trade_size,no_last_trade_side,\
+        trade_flow_imbalance,\
+        binance_bid_depth_3,binance_ask_depth_3,\
+        binance_bid_depth_all,binance_ask_depth_all,\
+        binance_bid_levels,binance_ask_levels,\
+        binance_book_imbalance,binance_poly_obi_divergence"
     }
 
     pub fn to_csv_line(&self) -> String {
@@ -145,7 +192,13 @@ impl CsvRecord {
             {:.6},{:.6},{:.6},{:.6},{:.6},{},\
             {:.2},{},{},{:.4},{},\
             {:.4},{:.4},\
-            {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{}",
+            {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},\
+            {:.0},{:.0},{:.0},{:.0},\
+            {:.0},{:.0},{:.0},{:.0},\
+            {},{},{},{},\
+            {:.4},{:.4},{:.4},\
+            {:.4},{:.0},{},{:.4},{:.0},{},{:.4},\
+            {:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4}",
             self.timestamp, self.market_slug,
             self.binance_price, self.binance_volume,
             self.yes_bid, self.yes_bid_size, self.yes_ask, self.yes_ask_size,
@@ -168,6 +221,39 @@ impl CsvRecord {
             self.rtds_price_advantage_bps, self.rtds_chainlink_binance_spread_bps,
             self.rtds_binance_lag_ms, self.rtds_chainlink_lag_ms,
             self.rtds_binance_stale_ms, self.rtds_chainlink_stale_ms,
+            // Order Book Depth columns
+            self.yes_bid_depth_3,
+            self.yes_ask_depth_3,
+            self.no_bid_depth_3,
+            self.no_ask_depth_3,
+            self.yes_bid_depth_all,
+            self.yes_ask_depth_all,
+            self.no_bid_depth_all,
+            self.no_ask_depth_all,
+            self.yes_bid_levels,
+            self.yes_ask_levels,
+            self.no_bid_levels,
+            self.no_ask_levels,
+            self.yes_book_imbalance,
+            self.no_book_imbalance,
+            self.combined_obi,
+            // Trade Flow columns
+            self.yes_last_trade_price,
+            self.yes_last_trade_size,
+            self.yes_last_trade_side,
+            self.no_last_trade_price,
+            self.no_last_trade_size,
+            self.no_last_trade_side,
+            self.trade_flow_imbalance,
+            // Binance L2 Depth columns
+            self.binance_bid_depth_3,
+            self.binance_ask_depth_3,
+            self.binance_bid_depth_all,
+            self.binance_ask_depth_all,
+            self.binance_bid_levels,
+            self.binance_ask_levels,
+            self.binance_book_imbalance,
+            self.binance_poly_obi_divergence,
         )
     }
 }
@@ -588,6 +674,14 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Cache Binance depth data per symbol (fetch once)
+        let mut binance_depths: HashMap<&str, _> = HashMap::new();
+        for sym in &unique_symbols {
+            if let Some(depth) = binance_manager.get_depth_data(sym).await {
+                binance_depths.insert(sym.as_str(), depth);
+            }
+        }
+
         // RTDS snapshots per asset (pre-computed once, shared across same-asset markets)
         let mut rtds_per_asset: HashMap<String, RtdsSnapshot> = HashMap::new();
         for (binance_sym, asset) in &[
@@ -718,6 +812,55 @@ async fn main() -> Result<()> {
                 snapshot.vol_source_path.clone()
             };
 
+            // --- Order Book Depth ---
+            let yes_bid_depth_3 = yes_prices.as_ref().map(|p| p.bid_depth_3).unwrap_or(0.0);
+            let yes_ask_depth_3 = yes_prices.as_ref().map(|p| p.ask_depth_3).unwrap_or(0.0);
+            let no_bid_depth_3 = no_prices.as_ref().map(|p| p.bid_depth_3).unwrap_or(0.0);
+            let no_ask_depth_3 = no_prices.as_ref().map(|p| p.ask_depth_3).unwrap_or(0.0);
+            let yes_bid_depth_all = yes_prices.as_ref().map(|p| p.bid_depth_all).unwrap_or(0.0);
+            let yes_ask_depth_all = yes_prices.as_ref().map(|p| p.ask_depth_all).unwrap_or(0.0);
+            let no_bid_depth_all = no_prices.as_ref().map(|p| p.bid_depth_all).unwrap_or(0.0);
+            let no_ask_depth_all = no_prices.as_ref().map(|p| p.ask_depth_all).unwrap_or(0.0);
+            let yes_bid_levels = yes_prices.as_ref().map(|p| p.bid_levels_count).unwrap_or(0);
+            let yes_ask_levels = yes_prices.as_ref().map(|p| p.ask_levels_count).unwrap_or(0);
+            let no_bid_levels = no_prices.as_ref().map(|p| p.bid_levels_count).unwrap_or(0);
+            let no_ask_levels = no_prices.as_ref().map(|p| p.ask_levels_count).unwrap_or(0);
+            let yes_book_imbalance = yes_prices.as_ref().map(|p| p.book_imbalance).unwrap_or(0.0);
+            let no_book_imbalance = no_prices.as_ref().map(|p| p.book_imbalance).unwrap_or(0.0);
+            let all_bids = yes_bid_depth_all + no_bid_depth_all;
+            let all_asks = yes_ask_depth_all + no_ask_depth_all;
+            let combined_obi = if (all_bids + all_asks) > 0.0 {
+                (all_bids - all_asks) / (all_bids + all_asks)
+            } else { 0.0 };
+
+            // --- Trade Flow ---
+            let yes_last_trade_price = yes_prices.as_ref().map(|p| p.last_trade_price).unwrap_or(0.0);
+            let yes_last_trade_size = yes_prices.as_ref().map(|p| p.last_trade_size).unwrap_or(0.0);
+            let yes_last_trade_side = yes_prices.as_ref().map(|p| p.last_trade_side.clone()).unwrap_or_default();
+            let no_last_trade_price = no_prices.as_ref().map(|p| p.last_trade_price).unwrap_or(0.0);
+            let no_last_trade_size = no_prices.as_ref().map(|p| p.last_trade_size).unwrap_or(0.0);
+            let no_last_trade_side = no_prices.as_ref().map(|p| p.last_trade_side.clone()).unwrap_or_default();
+            let yes_taker_buy = yes_prices.as_ref().map(|p| p.taker_buy_volume).unwrap_or(0.0);
+            let yes_taker_sell = yes_prices.as_ref().map(|p| p.taker_sell_volume).unwrap_or(0.0);
+            let no_taker_buy = no_prices.as_ref().map(|p| p.taker_buy_volume).unwrap_or(0.0);
+            let no_taker_sell = no_prices.as_ref().map(|p| p.taker_sell_volume).unwrap_or(0.0);
+            let total_buy = yes_taker_buy + no_taker_buy;
+            let total_sell = yes_taker_sell + no_taker_sell;
+            let trade_flow_imbalance = if (total_buy + total_sell) > 0.0 {
+                (total_buy - total_sell) / (total_buy + total_sell)
+            } else { 0.0 };
+
+            // --- Binance L2 Depth ---
+            let binance_depth = binance_depths.get(sym);
+            let binance_bid_depth_3 = binance_depth.map(|d| d.bid_depth_3).unwrap_or(0.0);
+            let binance_ask_depth_3 = binance_depth.map(|d| d.ask_depth_3).unwrap_or(0.0);
+            let binance_bid_depth_all = binance_depth.map(|d| d.bid_depth_all).unwrap_or(0.0);
+            let binance_ask_depth_all = binance_depth.map(|d| d.ask_depth_all).unwrap_or(0.0);
+            let binance_bid_levels = binance_depth.map(|d| d.bid_levels).unwrap_or(0);
+            let binance_ask_levels = binance_depth.map(|d| d.ask_levels).unwrap_or(0);
+            let binance_book_imbalance = binance_depth.map(|d| d.book_imbalance).unwrap_or(0.0);
+            let binance_poly_obi_divergence = binance_book_imbalance - yes_book_imbalance;
+
             let rtds_snap = rtds_per_asset.get(cfg.asset).cloned().unwrap_or_default();
             let r = &rtds_snap;
 
@@ -766,6 +909,39 @@ async fn main() -> Result<()> {
                 rtds_chainlink_lag_ms: r.rtds_chainlink_lag_ms,
                 rtds_binance_stale_ms: r.rtds_binance_stale_ms,
                 rtds_chainlink_stale_ms: r.rtds_chainlink_stale_ms,
+                // Order Book Depth columns
+                yes_bid_depth_3: sanitize(yes_bid_depth_3),
+                yes_ask_depth_3: sanitize(yes_ask_depth_3),
+                no_bid_depth_3: sanitize(no_bid_depth_3),
+                no_ask_depth_3: sanitize(no_ask_depth_3),
+                yes_bid_depth_all: sanitize(yes_bid_depth_all),
+                yes_ask_depth_all: sanitize(yes_ask_depth_all),
+                no_bid_depth_all: sanitize(no_bid_depth_all),
+                no_ask_depth_all: sanitize(no_ask_depth_all),
+                yes_bid_levels,
+                yes_ask_levels,
+                no_bid_levels,
+                no_ask_levels,
+                yes_book_imbalance: sanitize(yes_book_imbalance),
+                no_book_imbalance: sanitize(no_book_imbalance),
+                combined_obi: sanitize(combined_obi),
+                // Trade Flow columns
+                yes_last_trade_price: sanitize(yes_last_trade_price),
+                yes_last_trade_size: sanitize(yes_last_trade_size),
+                yes_last_trade_side,
+                no_last_trade_price: sanitize(no_last_trade_price),
+                no_last_trade_size: sanitize(no_last_trade_size),
+                no_last_trade_side,
+                trade_flow_imbalance: sanitize(trade_flow_imbalance),
+                // Binance L2 Depth columns
+                binance_bid_depth_3: sanitize(binance_bid_depth_3),
+                binance_ask_depth_3: sanitize(binance_ask_depth_3),
+                binance_bid_depth_all: sanitize(binance_bid_depth_all),
+                binance_ask_depth_all: sanitize(binance_ask_depth_all),
+                binance_bid_levels,
+                binance_ask_levels,
+                binance_book_imbalance: sanitize(binance_book_imbalance),
+                binance_poly_obi_divergence: sanitize(binance_poly_obi_divergence),
             };
 
             ms.csv_writer.write_record(&record)?;

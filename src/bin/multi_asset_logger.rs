@@ -132,6 +132,15 @@ pub struct CsvRecord {
     pub no_last_trade_size: f64,
     pub no_last_trade_side: String,
     pub trade_flow_imbalance: f64,
+    // === BINANCE L2 DEPTH (from Binance depth20@100ms stream) ===
+    pub binance_bid_depth_3: f64,
+    pub binance_ask_depth_3: f64,
+    pub binance_bid_depth_all: f64,
+    pub binance_ask_depth_all: f64,
+    pub binance_bid_levels: u16,
+    pub binance_ask_levels: u16,
+    pub binance_book_imbalance: f64,
+    pub binance_poly_obi_divergence: f64,
 }
 
 impl CsvRecord {
@@ -157,7 +166,11 @@ impl CsvRecord {
         yes_book_imbalance,no_book_imbalance,combined_obi,\
         yes_last_trade_price,yes_last_trade_size,yes_last_trade_side,\
         no_last_trade_price,no_last_trade_size,no_last_trade_side,\
-        trade_flow_imbalance"
+        trade_flow_imbalance,\
+        binance_bid_depth_3,binance_ask_depth_3,\
+        binance_bid_depth_all,binance_ask_depth_all,\
+        binance_bid_levels,binance_ask_levels,\
+        binance_book_imbalance,binance_poly_obi_divergence"
     }
 
     pub fn to_csv_line(&self) -> String {
@@ -177,7 +190,8 @@ impl CsvRecord {
             {:.0},{:.0},{:.0},{:.0},\
             {},{},{},{},\
             {:.4},{:.4},{:.4},\
-            {:.4},{:.0},{},{:.4},{:.0},{},{:.4}",
+            {:.4},{:.0},{},{:.4},{:.0},{},{:.4},\
+            {:.4},{:.4},{:.4},{:.4},{},{},{:.4},{:.4}",
             self.timestamp, self.market_slug,
             self.binance_price, self.binance_volume,
             self.yes_bid, self.yes_bid_size, self.yes_ask, self.yes_ask_size,
@@ -224,6 +238,15 @@ impl CsvRecord {
             self.no_last_trade_size,
             self.no_last_trade_side,
             self.trade_flow_imbalance,
+            // Binance L2 Depth columns
+            self.binance_bid_depth_3,
+            self.binance_ask_depth_3,
+            self.binance_bid_depth_all,
+            self.binance_ask_depth_all,
+            self.binance_bid_levels,
+            self.binance_ask_levels,
+            self.binance_book_imbalance,
+            self.binance_poly_obi_divergence,
         )
     }
 }
@@ -644,6 +667,14 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Cache Binance depth data per symbol (fetch once)
+        let mut binance_depths: HashMap<&str, _> = HashMap::new();
+        for sym in &unique_symbols {
+            if let Some(depth) = binance_manager.get_depth_data(sym).await {
+                binance_depths.insert(sym.as_str(), depth);
+            }
+        }
+
         // RTDS snapshots per asset (pre-computed once, shared across same-asset markets)
         let mut rtds_per_asset: HashMap<String, RtdsSnapshot> = HashMap::new();
         for (binance_sym, asset) in &[
@@ -815,6 +846,17 @@ async fn main() -> Result<()> {
                 (total_buy - total_sell) / (total_buy + total_sell)
             } else { 0.0 };
 
+            // --- Binance L2 Depth ---
+            let binance_depth = binance_depths.get(sym);
+            let binance_bid_depth_3 = binance_depth.map(|d| d.bid_depth_3).unwrap_or(0.0);
+            let binance_ask_depth_3 = binance_depth.map(|d| d.ask_depth_3).unwrap_or(0.0);
+            let binance_bid_depth_all = binance_depth.map(|d| d.bid_depth_all).unwrap_or(0.0);
+            let binance_ask_depth_all = binance_depth.map(|d| d.ask_depth_all).unwrap_or(0.0);
+            let binance_bid_levels = binance_depth.map(|d| d.bid_levels).unwrap_or(0);
+            let binance_ask_levels = binance_depth.map(|d| d.ask_levels).unwrap_or(0);
+            let binance_book_imbalance = binance_depth.map(|d| d.book_imbalance).unwrap_or(0.0);
+            let binance_poly_obi_divergence = binance_book_imbalance - yes_book_imbalance;
+
             let record = CsvRecord {
                 timestamp: now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
                 market_slug: ms.market.slug.clone(),
@@ -883,6 +925,15 @@ async fn main() -> Result<()> {
                 no_last_trade_size: sanitize(no_last_trade_size),
                 no_last_trade_side,
                 trade_flow_imbalance: sanitize(trade_flow_imbalance),
+                // Binance L2 Depth columns
+                binance_bid_depth_3: sanitize(binance_bid_depth_3),
+                binance_ask_depth_3: sanitize(binance_ask_depth_3),
+                binance_bid_depth_all: sanitize(binance_bid_depth_all),
+                binance_ask_depth_all: sanitize(binance_ask_depth_all),
+                binance_bid_levels,
+                binance_ask_levels,
+                binance_book_imbalance: sanitize(binance_book_imbalance),
+                binance_poly_obi_divergence: sanitize(binance_poly_obi_divergence),
             };
 
             ms.csv_writer.write_record(&record)?;

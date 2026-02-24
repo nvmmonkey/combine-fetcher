@@ -4,6 +4,11 @@
 //! timestamp) instead of local SystemTime. This preserves the RTDS timing edge:
 //! Chainlink aggregation latency + Polygon block time become visible in lag metrics.
 //!
+//! Three independent WebSocket streams:
+//!   - `bookTicker` → bid/ask prices → `BinancePrice` (Arc<RwLock<HashMap>>)
+//!   - `aggTrade`   → trade volume   → `VolumeTracker` (rolling 1s/1min windows)
+//!   - `depth20@100ms` → L2 orderbook depth (20 levels) → `BinanceDepthData` (OBI calculation)
+//!
 //! Run both loggers side-by-side to compare data quality.
 
 use anyhow::{anyhow, Result};
@@ -115,6 +120,39 @@ struct BinanceAggTradeEvent {
     _trade_time: i64,
 }
 
+/// Binance partial book depth snapshot from @depth20@100ms stream
+#[derive(Debug, Deserialize)]
+struct BinanceDepthEvent {
+    /// Last update ID for this snapshot
+    #[serde(rename = "lastUpdateId")]
+    _last_update_id: u64,
+    /// Bid levels: [[price, qty], ...]
+    bids: Vec<[String; 2]>,
+    /// Ask levels: [[price, qty], ...]
+    asks: Vec<[String; 2]>,
+}
+
+/// Processed Binance depth data (thread-safe snapshot)
+#[derive(Debug, Clone, Default)]
+pub struct BinanceDepthData {
+    /// Sum of qty for top 3 bid levels
+    pub bid_depth_3: f64,
+    /// Sum of qty for top 3 ask levels
+    pub ask_depth_3: f64,
+    /// Sum of qty for ALL bid levels (up to 20)
+    pub bid_depth_all: f64,
+    /// Sum of qty for ALL ask levels (up to 20)
+    pub ask_depth_all: f64,
+    /// Number of bid price levels with qty > 0
+    pub bid_levels: u16,
+    /// Number of ask price levels with qty > 0
+    pub ask_levels: u16,
+    /// OBI: (bid_depth_all - ask_depth_all) / (bid_depth_all + ask_depth_all), range [-1, 1]
+    pub book_imbalance: f64,
+    /// Binance event receive timestamp (local clock, for staleness monitoring only)
+    pub last_update_ms: u64,
+}
+
 // ============================================================================
 // REST API STRUCTURES (for historical kline bootstrap)
 // ============================================================================
@@ -191,6 +229,10 @@ pub struct BinanceDataManager {
     volume_trackers: HashMap<String, Arc<Mutex<VolumeTracker>>>,
     /// Latest event times per symbol: symbol -> event_time_ms (from Binance streams)
     event_times: Arc<RwLock<HashMap<String, u64>>>,
+    /// Thread-safe depth data storage: symbol -> BinanceDepthData
+    depth_data: Arc<RwLock<HashMap<String, BinanceDepthData>>>,
+    /// Whether a reconnection is in progress (depth stream)
+    reconnecting_depth: Arc<RwLock<bool>>,
     /// HTTP client for REST API calls (reusable)
     http_client: reqwest::Client,
 }
@@ -214,6 +256,8 @@ impl BinanceDataManager {
             vol_calculators: HashMap::new(),
             volume_trackers: HashMap::new(),
             event_times: Arc::new(RwLock::new(HashMap::new())),
+            depth_data: Arc::new(RwLock::new(HashMap::new())),
+            reconnecting_depth: Arc::new(RwLock::new(false)),
             http_client,
         }
     }
@@ -239,6 +283,8 @@ impl BinanceDataManager {
             vol_calculators: HashMap::new(),
             volume_trackers: HashMap::new(),
             event_times: Arc::new(RwLock::new(HashMap::new())),
+            depth_data: Arc::new(RwLock::new(HashMap::new())),
+            reconnecting_depth: Arc::new(RwLock::new(false)),
             http_client,
         }
     }
@@ -535,6 +581,32 @@ impl BinanceDataManager {
             .await
         });
 
+        // Build depth streams URL (3rd connection)
+        let depth_url = {
+            let streams: Vec<String> = self
+                .symbols
+                .iter()
+                .map(|s| format!("{}@depth20@100ms", s.to_lowercase()))
+                .collect();
+            format!("{}/{}", self.ws_url, streams.join("/"))
+        };
+
+        info!("Connecting to Binance WebSocket (depth): {}", depth_url);
+
+        let depth_data_clone = self.depth_data.clone();
+        let reconnecting_depth_clone = self.reconnecting_depth.clone();
+        let symbols_depth = self.symbols.clone();
+
+        tokio::spawn(async move {
+            Self::depth_connection_loop(
+                depth_url,
+                depth_data_clone,
+                reconnecting_depth_clone,
+                symbols_depth,
+            )
+            .await
+        });
+
         Ok(())
     }
 
@@ -755,6 +827,12 @@ impl BinanceDataManager {
         })
     }
 
+    /// Get the latest depth data (OBI + book levels) for a symbol
+    pub async fn get_depth_data(&self, symbol: &str) -> Option<BinanceDepthData> {
+        let depth = self.depth_data.read().await;
+        depth.get(&symbol.to_uppercase()).cloned()
+    }
+
     // ========================================================================
     // WEBSOCKET CONNECTION LOOPS (Internal)
     // ========================================================================
@@ -960,6 +1038,84 @@ impl BinanceDataManager {
         }
     }
 
+    /// Main depth connection loop with auto-reconnect
+    async fn depth_connection_loop(
+        url: String,
+        depth_data: Arc<RwLock<HashMap<String, BinanceDepthData>>>,
+        reconnecting: Arc<RwLock<bool>>,
+        symbols: Vec<String>,
+    ) {
+        let mut reconnect_delay = tokio::time::Duration::from_secs(1);
+        const MAX_RECONNECT_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+
+        let symbol = symbols.first().cloned().unwrap_or_default();
+
+        loop {
+            {
+                let mut reconnecting_guard = reconnecting.write().await;
+                if *reconnecting_guard {
+                    debug!("Depth reconnection already in progress, waiting to retry...");
+                    drop(reconnecting_guard);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                *reconnecting_guard = true;
+            }
+
+            match connect_async(&url).await {
+                Ok((ws_stream, _)) => {
+                    reconnect_delay = tokio::time::Duration::from_secs(1);
+                    info!("Connected to Binance depth WebSocket");
+                    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+                    debug!("Depth message loop started");
+
+                    while let Some(msg_result) = ws_receiver.next().await {
+                        match msg_result {
+                            Ok(Message::Text(text)) => {
+                                if let Err(e) =
+                                    Self::handle_depth_message(&text, &depth_data, &symbol).await
+                                {
+                                    warn!("Failed to parse depth message: {}", e);
+                                }
+                            }
+                            Ok(Message::Ping(data)) => {
+                                if let Err(e) = ws_sender.send(Message::Pong(data)).await {
+                                    error!("Failed to send pong (depth): {}", e);
+                                    break;
+                                }
+                            }
+                            Ok(Message::Pong(_)) => {
+                                debug!("Received pong from Binance (depth)");
+                            }
+                            Ok(Message::Close(_)) => {
+                                warn!("Binance depth WebSocket connection closed");
+                                break;
+                            }
+                            Ok(Message::Binary(_)) => {}
+                            Ok(Message::Frame(_)) => {}
+                            Err(e) => {
+                                error!("Depth WebSocket error: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to connect to Binance depth WebSocket: {}", e);
+                }
+            }
+
+            {
+                let mut reconnecting_guard = reconnecting.write().await;
+                *reconnecting_guard = false;
+            }
+
+            warn!("Reconnecting depth in {:?}...", reconnect_delay);
+            tokio::time::sleep(reconnect_delay).await;
+            reconnect_delay = std::cmp::min(reconnect_delay * 2, MAX_RECONNECT_DELAY);
+        }
+    }
+
     // ========================================================================
     // MESSAGE HANDLERS (Internal)
     // ========================================================================
@@ -1109,6 +1265,74 @@ impl BinanceDataManager {
 
         Ok(())
     }
+
+    /// Handle incoming partial book depth WebSocket message
+    async fn handle_depth_message(
+        text: &str,
+        depth_data: &Arc<RwLock<HashMap<String, BinanceDepthData>>>,
+        symbol: &str,
+    ) -> Result<()> {
+        let event: BinanceDepthEvent =
+            serde_json::from_str(text).map_err(|e| anyhow!("Failed to parse depth: {}", e))?;
+
+        let upper_symbol = symbol.to_uppercase();
+
+        let bid_quantities: Vec<f64> = event
+            .bids
+            .iter()
+            .filter_map(|level| level[1].parse::<f64>().ok())
+            .filter(|qty| *qty > 0.0)
+            .collect();
+        let ask_quantities: Vec<f64> = event
+            .asks
+            .iter()
+            .filter_map(|level| level[1].parse::<f64>().ok())
+            .filter(|qty| *qty > 0.0)
+            .collect();
+
+        let bid_depth_3: f64 = bid_quantities.iter().take(3).sum();
+        let ask_depth_3: f64 = ask_quantities.iter().take(3).sum();
+        let bid_depth_all: f64 = bid_quantities.iter().sum();
+        let ask_depth_all: f64 = ask_quantities.iter().sum();
+
+        let total = bid_depth_all + ask_depth_all;
+        let book_imbalance = if total > 0.0 {
+            (bid_depth_all - ask_depth_all) / total
+        } else {
+            0.0
+        };
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        let data = BinanceDepthData {
+            bid_depth_3,
+            ask_depth_3,
+            bid_depth_all,
+            ask_depth_all,
+            bid_levels: bid_quantities.len() as u16,
+            ask_levels: ask_quantities.len() as u16,
+            book_imbalance,
+            last_update_ms: now_ms,
+        };
+
+        {
+            let mut depth_guard = depth_data.write().await;
+            depth_guard.insert(upper_symbol.clone(), data);
+        }
+
+        debug!(
+            "Updated depth for {}: OBI={:.4}, bids={}, asks={}",
+            upper_symbol,
+            book_imbalance,
+            bid_quantities.len(),
+            ask_quantities.len()
+        );
+
+        Ok(())
+    }
 }
 
 impl Default for BinanceDataManager {
@@ -1194,5 +1418,60 @@ mod tests {
         let json_arr: Vec<serde_json::Value> = serde_json::from_str(r#"[1, 2, 3]"#).unwrap();
         let kline = Kline::from_json(&json_arr);
         assert!(kline.is_none());
+    }
+
+    #[test]
+    fn test_binance_depth_data_default() {
+        let data = BinanceDepthData::default();
+        assert_eq!(data.bid_depth_3, 0.0);
+        assert_eq!(data.ask_depth_3, 0.0);
+        assert_eq!(data.book_imbalance, 0.0);
+        assert_eq!(data.bid_levels, 0);
+        assert_eq!(data.ask_levels, 0);
+    }
+
+    #[test]
+    fn test_binance_depth_event_parse() {
+        let json = r#"{
+            "lastUpdateId": 160,
+            "bids": [["97000.00", "1.5"], ["96999.00", "0.8"], ["96998.00", "2.1"]],
+            "asks": [["97001.00", "0.9"], ["97002.00", "1.2"], ["97003.00", "0.5"]]
+        }"#;
+        let event: BinanceDepthEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.bids.len(), 3);
+        assert_eq!(event.asks.len(), 3);
+        assert_eq!(event._last_update_id, 160);
+    }
+
+    #[tokio::test]
+    async fn test_get_depth_data_none_before_connect() {
+        let manager = BinanceDataManager::new();
+        assert!(manager.get_depth_data("BTCUSDT").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_depth_message() {
+        let depth_data = Arc::new(RwLock::new(HashMap::new()));
+        let json = r#"{
+            "lastUpdateId": 160,
+            "bids": [["97000.00", "1.5"], ["96999.00", "0.8"], ["96998.00", "2.1"], ["96997.00", "0.3"], ["96996.00", "1.0"]],
+            "asks": [["97001.00", "0.9"], ["97002.00", "1.2"], ["97003.00", "0.5"], ["97004.00", "0.7"], ["97005.00", "0.4"]]
+        }"#;
+
+        BinanceDataManager::handle_depth_message(json, &depth_data, "BTCUSDT")
+            .await
+            .unwrap();
+
+        let guard = depth_data.read().await;
+        let data = guard.get("BTCUSDT").unwrap();
+
+        assert!((data.bid_depth_3 - 4.4).abs() < 0.001);
+        assert!((data.ask_depth_3 - 2.6).abs() < 0.001);
+        assert!((data.bid_depth_all - 5.7).abs() < 0.001);
+        assert!((data.ask_depth_all - 3.7).abs() < 0.001);
+        assert_eq!(data.bid_levels, 5);
+        assert_eq!(data.ask_levels, 5);
+        assert!((data.book_imbalance - 0.2128).abs() < 0.001);
+        assert!(data.last_update_ms > 0);
     }
 }
