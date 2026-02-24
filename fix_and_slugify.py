@@ -85,6 +85,7 @@ def find_csv_files(directories: list[str]) -> list[str]:
                 continue
             for fname in sorted(files):
                 if fname.lower().endswith(".csv") and "_fixed" not in fname:
+                    # if fname.lower().endswith(".csv"):
                     csv_files.append(os.path.join(root, fname))
     csv_files.sort()
     return csv_files
