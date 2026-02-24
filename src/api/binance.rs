@@ -4,7 +4,7 @@
 //! Three independent WebSocket streams:
 //!   - `bookTicker` → bid/ask prices → `BinancePrice` (Arc<RwLock<HashMap>>)
 //!   - `aggTrade`   → trade volume   → `VolumeTracker` (rolling 1s/1min windows)
-//!   - `depth5@100ms` → L2 orderbook depth → `BinanceDepthData` (OBI calculation)
+//!   - `depth20@100ms` → L2 orderbook depth (20 levels) → `BinanceDepthData` (OBI calculation)
 //!
 //! Binance OBI (Order Book Imbalance) serves as a leading indicator:
 //!   `binance_obi = (bid_depth - ask_depth) / (bid_depth + ask_depth)`, range [-1, +1]
@@ -123,7 +123,7 @@ struct BinanceAggTradeEvent {
     _trade_time: i64,
 }
 
-/// Binance partial book depth snapshot from @depth5@100ms stream
+/// Binance partial book depth snapshot from @depth20@100ms stream
 #[derive(Debug, Deserialize)]
 struct BinanceDepthEvent {
     /// Last update ID for this snapshot
@@ -589,7 +589,7 @@ impl BinanceDataManager {
             let streams: Vec<String> = self
                 .symbols
                 .iter()
-                .map(|s| format!("{}@depth5@100ms", s.to_lowercase()))
+                .map(|s| format!("{}@depth20@100ms", s.to_lowercase()))
                 .collect();
             format!("{}/{}", self.ws_url, streams.join("/"))
         };

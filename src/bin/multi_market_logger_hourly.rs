@@ -18,11 +18,21 @@
 //!   [55-69] Polymarket Depth: yes/no_bid/ask_depth_3/all, levels, OBI, combined_obi
 //!   [70-76] Trade Flow: yes/no_last_trade_price/size/side, trade_flow_imbalance
 //!   [77-83] Binance Depth: binance_bid/ask_depth_3/all, levels, binance_book_imbalance,
-//!           binance_poly_obi_divergence (= binance_obi - polymarket_combined_obi)
+//!           binance_poly_obi_divergence (= binance_obi - yes_book_imbalance)
 //!
-//! BINANCE OBI USAGE:
-//!   binance_book_imbalance < -0.20 AND combined_obi > -0.05
-//!     → Binance sellers dominating, Polymarket hasn't reacted → frontrun signal
+//! NOTE ON POLYMARKET OBI IN BINARY MARKETS:
+//!   combined_obi (col 68) is structurally always ~0 on binary YES/NO markets.
+//!   Reason: YES bids ≡ NO asks (a $0.48 YES bid IS a $0.52 NO ask). The two
+//!   orderbooks are mirrors, so yes_bid_depth + no_bid_depth ≡ yes_ask_depth + no_ask_depth.
+//!   Therefore (all_bids - all_asks) / (all_bids + all_asks) ≡ 0.
+//!   The individual yes_book_imbalance and no_book_imbalance are useful signals,
+//!   but combined_obi and no_book_imbalance are redundant (no_obi ≈ -yes_obi).
+//!
+//! BINANCE OBI DIVERGENCE:
+//!   binance_poly_obi_divergence = binance_book_imbalance - yes_book_imbalance
+//!   Uses YES token OBI (not combined_obi) because combined_obi ≡ 0.
+//!   Positive = Binance more bullish than Poly YES book → buy YES signal
+//!   Negative = Binance more bearish than Poly YES book → sell YES signal
 
 use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
@@ -967,9 +977,11 @@ async fn main() -> Result<()> {
         let binance_book_imbalance = binance_depth.as_ref().map(|d| d.book_imbalance).unwrap_or(0.0);
 
         // Binance vs Polymarket OBI divergence (leading indicator signal)
-        // Positive = Binance more bullish than Poly (Binance bids > asks, Poly hasn't reacted)
-        // Negative = Binance more bearish than Poly
-        let binance_poly_obi_divergence = binance_book_imbalance - combined_obi;
+        // Uses YES token OBI (not combined_obi which is always ~0 on binary markets
+        // because YES bids ≡ NO asks — the orderbooks are mirrors).
+        // Positive = Binance more bullish than Poly YES book
+        // Negative = Binance more bearish than Poly YES book
+        let binance_poly_obi_divergence = binance_book_imbalance - yes_book_imbalance;
 
         // Build record (backward compatible order)
         let record = CsvRecord {
