@@ -11,7 +11,7 @@ Pipeline:
 5. Output one clean <slug>.csv per market
 
 Usage:
-    uv run fix_and_slugify.py ./218data/ -o ./218data/slugified
+    uv run fix_and_slugify.py ./302data/ -o ./302data/fixed
     python3 fix_and_slugify.py ./218data/ ./219data/ ./220data/ -o ./all_slugified
 """
 
@@ -77,15 +77,18 @@ def fetch_outcome(slug: str, session: requests.Session) -> str | None:
 # ============================================================================
 
 def find_csv_files(directories: list[str]) -> list[str]:
-    """Find all .csv files under given directories, excluding _fixed and slugified."""
+    """Find all .csv files under given directories, excluding output subdirs."""
+    # Subdirectory names to skip (already-processed output)
+    SKIP_DIRS = {"slugified", "fixed", "oldtime"}
+
     csv_files = []
     for directory in directories:
-        for root, _, files in os.walk(directory):
-            if "slugified" in root:
-                continue
+        for root, dirs, files in os.walk(directory):
+            # Prune excluded subdirectories so os.walk won't descend into them
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
             for fname in sorted(files):
-                if fname.lower().endswith(".csv") and "_fixed" not in fname:
-                    # if fname.lower().endswith(".csv"):
+                # if fname.lower().endswith(".csv") and "_fixed" not in fname:
+                if fname.lower().endswith(".csv"):
                     csv_files.append(os.path.join(root, fname))
     csv_files.sort()
     return csv_files
@@ -94,11 +97,14 @@ def find_csv_files(directories: list[str]) -> list[str]:
 def load_all_csvs(csv_files: list[str]) -> pd.DataFrame:
     """Load and concatenate all CSVs into one DataFrame."""
     frames = []
+    col_counts = {}
     for path in csv_files:
         try:
             df = pd.read_csv(path, low_memory=False)
             frames.append(df)
-            print(f"  {os.path.basename(path)}: {len(df):,} rows")
+            ncols = len(df.columns)
+            col_counts.setdefault(ncols, []).append(os.path.basename(path))
+            print(f"  {os.path.basename(path)}: {len(df):,} rows, {ncols} cols")
         except Exception as e:
             print(f"  {os.path.basename(path)}: SKIPPED ({e})")
 
@@ -106,8 +112,22 @@ def load_all_csvs(csv_files: list[str]) -> pd.DataFrame:
         print("No valid CSV files found.")
         sys.exit(1)
 
+    # Warn about column count mismatches between files
+    if len(col_counts) > 1:
+        print(f"\n  [WARN] Column count mismatch across files:")
+        for ncols, fnames in sorted(col_counts.items()):
+            print(f"    {ncols} cols: {len(fnames)} file(s)  (e.g. {fnames[0]})")
+        # Use the most common column set as the canonical schema
+        canonical_ncols = max(col_counts, key=lambda k: len(col_counts[k]))
+        canonical_cols = [f for f in frames if len(f.columns) == canonical_ncols][0].columns.tolist()
+        extra_in_others = set()
+        for f in frames:
+            extra_in_others.update(set(f.columns) - set(canonical_cols))
+        if extra_in_others:
+            print(f"    Extra columns in non-canonical files: {sorted(extra_in_others)}")
+
     combined = pd.concat(frames, ignore_index=True)
-    print(f"\n  Total: {len(combined):,} rows\n")
+    print(f"\n  Total: {len(combined):,} rows, {len(combined.columns)} cols\n")
     return combined
 
 # ============================================================================
