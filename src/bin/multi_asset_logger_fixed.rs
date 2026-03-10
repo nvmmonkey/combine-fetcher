@@ -45,12 +45,12 @@ struct MarketConfig {
 
 const MARKETS: &[MarketConfig] = &[
     MarketConfig { asset: "btc", timeframe_secs: 300, binance_symbol: "BTCUSDT", default_vol: 0.55 },
-    MarketConfig { asset: "btc", timeframe_secs: 900, binance_symbol: "BTCUSDT", default_vol: 0.55 },
-    MarketConfig { asset: "eth", timeframe_secs: 300, binance_symbol: "ETHUSDT", default_vol: 0.65 },
-    MarketConfig { asset: "eth", timeframe_secs: 900, binance_symbol: "ETHUSDT", default_vol: 0.65 },
-    MarketConfig { asset: "sol", timeframe_secs: 300, binance_symbol: "SOLUSDT", default_vol: 0.85 },
-    MarketConfig { asset: "sol", timeframe_secs: 900, binance_symbol: "SOLUSDT", default_vol: 0.85 },
-    MarketConfig { asset: "xrp", timeframe_secs: 900, binance_symbol: "XRPUSDT", default_vol: 0.75 },
+    // MarketConfig { asset: "btc", timeframe_secs: 900, binance_symbol: "BTCUSDT", default_vol: 0.55 },
+    // MarketConfig { asset: "eth", timeframe_secs: 300, binance_symbol: "ETHUSDT", default_vol: 0.65 },
+    // MarketConfig { asset: "eth", timeframe_secs: 900, binance_symbol: "ETHUSDT", default_vol: 0.65 },
+    // MarketConfig { asset: "sol", timeframe_secs: 300, binance_symbol: "SOLUSDT", default_vol: 0.85 },
+    // MarketConfig { asset: "sol", timeframe_secs: 900, binance_symbol: "SOLUSDT", default_vol: 0.85 },
+    // MarketConfig { asset: "xrp", timeframe_secs: 900, binance_symbol: "XRPUSDT", default_vol: 0.75 },
 ];
 
 // ============================================================================
