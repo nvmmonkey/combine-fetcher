@@ -6,14 +6,14 @@
 //! which preserves Binance exchange-level event_time for RTDS edge detection.
 //! Run both loggers side-by-side to compare RTDS lag/stale data quality.
 //!
-//! Usage: cargo run --bin multi_asset_logger_fixed -- [duration_secs] [csv_dir] [record_interval_sec]
+//! Usage: cargo run --bin multi_asset_logger_fixed -- [--config path.yml] [duration_secs] [csv_dir] [record_interval_sec]
 //!
-//! Configure MARKETS array below to select which assets/timeframes to log.
+//! Without --config, defaults to BTC 5m only.
 
 use anyhow::Result;
 use chrono::{DateTime, Timelike, Utc};
 use rust_decimal::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
@@ -32,26 +32,61 @@ use combine_fetcher::api::strike;
 use combine_fetcher::{CSV_RECORD_INTERVAL_SEC, HTTP_TIMEOUT_SECS, MINUTES_PER_YEAR};
 
 // ============================================================================
-// USER CONFIGURATION — Edit this section to choose which markets to log
+// CONFIGURATION — loaded from YAML config file (--config flag)
 // ============================================================================
 
-#[allow(dead_code)]
-struct MarketConfig {
-    asset: &'static str,          // "btc", "eth", "sol", "xrp"
-    timeframe_secs: i64,          // 300 (5m) or 900 (15m)
-    binance_symbol: &'static str, // "BTCUSDT", "ETHUSDT", etc.
-    default_vol: f64,             // Default annualized volatility
+#[derive(Debug, Deserialize)]
+struct LoggerConfig {
+    markets: Vec<MarketConfigEntry>,
 }
 
-const MARKETS: &[MarketConfig] = &[
-    MarketConfig { asset: "btc", timeframe_secs: 300, binance_symbol: "BTCUSDT", default_vol: 0.55 },
-    // MarketConfig { asset: "btc", timeframe_secs: 900, binance_symbol: "BTCUSDT", default_vol: 0.55 },
-    // MarketConfig { asset: "eth", timeframe_secs: 300, binance_symbol: "ETHUSDT", default_vol: 0.65 },
-    // MarketConfig { asset: "eth", timeframe_secs: 900, binance_symbol: "ETHUSDT", default_vol: 0.65 },
-    // MarketConfig { asset: "sol", timeframe_secs: 300, binance_symbol: "SOLUSDT", default_vol: 0.85 },
-    // MarketConfig { asset: "sol", timeframe_secs: 900, binance_symbol: "SOLUSDT", default_vol: 0.85 },
-    // MarketConfig { asset: "xrp", timeframe_secs: 900, binance_symbol: "XRPUSDT", default_vol: 0.75 },
-];
+#[derive(Debug, Deserialize)]
+struct MarketConfigEntry {
+    asset: String,
+    timeframe: String,
+    binance_symbol: String,
+}
+
+struct MarketConfig {
+    asset: String,
+    timeframe_secs: i64,
+    binance_symbol: String,
+}
+
+impl MarketConfig {
+    fn from_entry(entry: &MarketConfigEntry) -> Result<Self> {
+        let timeframe_secs = match entry.timeframe.as_str() {
+            "5m" => 300i64,
+            "15m" => 900i64,
+            other => anyhow::bail!("unsupported timeframe '{}' (use 5m or 15m)", other),
+        };
+        Ok(Self {
+            asset: entry.asset.to_lowercase(),
+            timeframe_secs,
+            binance_symbol: entry.binance_symbol.clone(),
+        })
+    }
+}
+
+fn load_config(path: &str) -> Result<Vec<MarketConfig>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read config '{}': {}", path, e))?;
+    let cfg: LoggerConfig = serde_yaml::from_str(&contents)
+        .map_err(|e| anyhow::anyhow!("failed to parse config '{}': {}", path, e))?;
+    if cfg.markets.is_empty() {
+        anyhow::bail!("config '{}' has no markets defined", path);
+    }
+    cfg.markets.iter().map(MarketConfig::from_entry).collect()
+}
+
+/// Default: single BTC 5m market (matches previous hardcoded behavior)
+fn default_markets() -> Vec<MarketConfig> {
+    vec![MarketConfig {
+        asset: "btc".into(),
+        timeframe_secs: 300,
+        binance_symbol: "BTCUSDT".into(),
+    }]
+}
 
 // ============================================================================
 // CSV RECORD (same schema as hourly logger for compatibility)
@@ -461,19 +496,44 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║  Multi-Asset Logger FIXED (5m + 15m | BTC/ETH/SOL/XRP)     ║");
-    println!("║  {} markets | Hourly CSV | Binance exchange event_time    ║", MARKETS.len());
-    println!("╚═══════════════════════════════════════════════════════════════╝\n");
-
+    // --- Parse CLI args ---
+    // Usage: multi_asset_logger_fixed [--config path.yml] [duration_secs] [csv_dir] [record_interval_sec]
     let args: Vec<String> = std::env::args().collect();
-    let duration: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(28800);
-    let csv_dir = args.get(2).cloned().unwrap_or_else(|| ".".into());
-    let csv_record_interval_sec: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(CSV_RECORD_INTERVAL_SEC);
+    let (config_path, positional_start) = {
+        if let Some(pos) = args.iter().position(|a| a == "--config") {
+            match args.get(pos + 1) {
+                Some(p) => (Some(p.clone()), pos + 2),
+                None => {
+                    eprintln!("--config requires a path argument");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            (None, 1)
+        }
+    };
+    let positional: Vec<&String> = args[positional_start..].iter()
+        .filter(|a| *a != "--config")
+        .collect();
+
+    let markets: Vec<MarketConfig> = match &config_path {
+        Some(path) => load_config(path)?,
+        None => default_markets(),
+    };
+
+    let duration: u64 = positional.first().and_then(|s| s.parse().ok()).unwrap_or(28800);
+    let csv_dir = positional.get(1).map(|s| s.as_str()).unwrap_or(".").to_string();
+    let csv_record_interval_sec: u64 = positional.get(2).and_then(|s| s.parse().ok()).unwrap_or(CSV_RECORD_INTERVAL_SEC);
+
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Multi-Asset Logger FIXED (Hourly CSV | Binance event_time) ║");
+    println!("║  {} market(s) | Config: {:<37} ║", markets.len(),
+        config_path.as_deref().unwrap_or("(default)"));
+    println!("╚═══════════════════════════════════════════════════════════════╝\n");
 
     println!("Duration: {}s ({:.1}h) | CSV dir: {} | Interval: {}s", duration, duration as f64 / 3600.0, csv_dir, csv_record_interval_sec);
     println!("Markets:");
-    for cfg in MARKETS {
+    for cfg in &markets {
         println!("  - {}-{} ({})", cfg.asset.to_uppercase(), timeframe_label(cfg.timeframe_secs), cfg.binance_symbol);
     }
     println!();
@@ -491,12 +551,12 @@ async fn main() -> Result<()> {
 
     // --- Fetch all initial markets ---
     println!("Fetching initial markets...");
-    let mut market_states: Vec<MarketState> = Vec::with_capacity(MARKETS.len());
+    let mut market_states: Vec<MarketState> = Vec::with_capacity(markets.len());
 
-    for (i, cfg) in MARKETS.iter().enumerate() {
-        let tag = market_tag(cfg.asset, cfg.timeframe_secs);
+    for (i, cfg) in markets.iter().enumerate() {
+        let tag = market_tag(&cfg.asset, cfg.timeframe_secs);
         print!("  [{}] ...", tag);
-        match gamma::fetch_current_market_for(&http, cfg.asset, cfg.timeframe_secs).await {
+        match gamma::fetch_current_market_for(&http, &cfg.asset, cfg.timeframe_secs).await {
             Ok(m) => {
                 println!(" {} YES:{}... NO:{}...", m.unique_id,
                     truncate_id(&m.yes_token_id, 8, 0),
@@ -531,15 +591,15 @@ async fn main() -> Result<()> {
         error!("No markets could be fetched. Exiting.");
         return Err(anyhow::anyhow!("No markets available"));
     }
-    println!("Fetched {}/{} markets\n", market_states.len(), MARKETS.len());
+    println!("Fetched {}/{} markets\n", market_states.len(), markets.len());
 
     // --- Collect unique Binance symbols ---
     let unique_symbols: Vec<String> = {
         let mut seen = HashSet::new();
         market_states.iter()
             .filter_map(|ms| {
-                let sym = MARKETS[ms.config_idx].binance_symbol;
-                if seen.insert(sym) { Some(sym.to_string()) } else { None }
+                let sym = &markets[ms.config_idx].binance_symbol;
+                if seen.insert(sym.clone()) { Some(sym.clone()) } else { None }
             })
             .collect()
     };
@@ -560,25 +620,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // --- Fetch strikes for all markets ---
-    println!("\nFetching strike prices...");
+    // --- Fetch strikes for all markets (infinite retry, matches reference) ---
+    println!("\nFetching strike prices (will retry indefinitely)...");
     for ms in &mut market_states {
         print!("  [{}] ...", ms.tag);
-        match strike::fetch_strike_with_retry(&http, &ms.market, Some(strike::RetryConfig {
-            max_attempts: Some(30),
-            initial_backoff_ms: 200,
-            max_backoff_ms: 2000,
-        })).await {
-            Ok(s) => {
-                ms.market.strike_price = Some(s);
-                ms.market.strike_fetched = true;
-                println!(" ${:.2}", s);
-            }
-            Err(e) => {
-                println!(" FAILED: {}", e);
-                warn!("[{}] Strike not available, will use spot as fallback", ms.tag);
-            }
-        }
+        let s = strike::fetch_strike_with_retry(&http, &ms.market, None).await?;
+        ms.market.strike_price = Some(s);
+        ms.market.strike_fetched = true;
+        println!(" ${:.2}", s);
     }
 
     // --- Setup Polymarket ---
@@ -594,10 +643,17 @@ async fn main() -> Result<()> {
     println!("Polymarket connected ({} tokens)", market_states.len() * 2);
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // --- Setup RTDS (all assets) ---
-    let mut multi_rtds = MultiAssetRtdsTracker::new(&["btc", "eth", "sol", "xrp"]);
+    // --- Setup RTDS (only assets from config) ---
+    let unique_assets: Vec<String> = {
+        let mut seen = HashSet::new();
+        markets.iter()
+            .filter_map(|c| if seen.insert(c.asset.clone()) { Some(c.asset.clone()) } else { None })
+            .collect()
+    };
+    let asset_refs: Vec<&str> = unique_assets.iter().map(|s| s.as_str()).collect();
+    let mut multi_rtds = MultiAssetRtdsTracker::new(&asset_refs);
     multi_rtds.start();
-    println!("RTDS tracker connected (BTC/ETH/SOL/XRP)");
+    println!("RTDS tracker connected ({})", unique_assets.iter().map(|a| a.to_uppercase()).collect::<Vec<_>>().join("/"));
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // --- Setup Market Event Stream (WS new_market + market_resolved) ---
@@ -683,17 +739,13 @@ async fn main() -> Result<()> {
         }
 
         // RTDS snapshots per asset (pre-computed once, shared across same-asset markets)
-        let mut rtds_per_asset: HashMap<String, RtdsSnapshot> = HashMap::new();
-        for (binance_sym, asset) in &[
-            ("BTCUSDT", "btc"),
-            ("ETHUSDT", "eth"),
-            ("SOLUSDT", "sol"),
-            ("XRPUSDT", "xrp"),
-        ] {
-            if let Some(snap) = binance_snapshots.get(*binance_sym) {
+        let mut rtds_per_asset: HashMap<&str, RtdsSnapshot> = HashMap::new();
+        for cfg in &markets {
+            if rtds_per_asset.contains_key(cfg.asset.as_str()) { continue; }
+            if let Some(snap) = binance_snapshots.get(cfg.binance_symbol.as_str()) {
                 rtds_per_asset.insert(
-                    asset.to_string(),
-                    multi_rtds.get_snapshot(asset, snap.spot_price, snap.timestamp),
+                    &cfg.asset,
+                    multi_rtds.get_snapshot(&cfg.asset, snap.spot_price, snap.timestamp),
                 );
             }
         }
@@ -703,8 +755,8 @@ async fn main() -> Result<()> {
         // Process each market
         let mut needs_resubscribe = false;
         for ms in &mut market_states {
-            let cfg = &MARKETS[ms.config_idx];
-            let sym = cfg.binance_symbol;
+            let cfg = &markets[ms.config_idx];
+            let sym = cfg.binance_symbol.as_str();
 
             let snapshot = match binance_snapshots.get(sym) {
                 Some(s) => s,
@@ -861,7 +913,7 @@ async fn main() -> Result<()> {
             let binance_book_imbalance = binance_depth.map(|d| d.book_imbalance).unwrap_or(0.0);
             let binance_poly_obi_divergence = binance_book_imbalance - yes_book_imbalance;
 
-            let rtds_snap = rtds_per_asset.get(cfg.asset).cloned().unwrap_or_default();
+            let rtds_snap = rtds_per_asset.get(cfg.asset.as_str()).cloned().unwrap_or_default();
             let r = &rtds_snap;
 
             let record = CsvRecord {
@@ -1057,7 +1109,7 @@ async fn main() -> Result<()> {
                         }
                         _ => {
                             // No WS event or bad shape — Gamma API fallback
-                            gamma::fetch_next_market_for(&http, cfg.asset, cfg.timeframe_secs, ms.market.window_start).await
+                            gamma::fetch_next_market_for(&http, &cfg.asset, cfg.timeframe_secs, ms.market.window_start).await
                         }
                     };
 
@@ -1080,19 +1132,11 @@ async fn main() -> Result<()> {
                             ms.gamma_last_outcome_fetch_ms = 0;
                             ms.resolution_grace_start_ms = 0;
 
-                            // Fetch strike for new market
-                            match strike::fetch_strike_with_retry(&http, &ms.market, Some(strike::RetryConfig {
-                                max_attempts: Some(30),
-                                initial_backoff_ms: 200,
-                                max_backoff_ms: 2000,
-                            })).await {
-                                Ok(s) => {
-                                    ms.market.strike_price = Some(s);
-                                    ms.market.strike_fetched = true;
-                                    info!("[{}] Strike: ${:.2}", ms.tag, s);
-                                }
-                                Err(e) => warn!("[{}] Strike fetch failed: {}", ms.tag, e),
-                            }
+                            // Fetch strike for new market (infinite retry, matches reference)
+                            let s = strike::fetch_strike_with_retry(&http, &ms.market, None).await?;
+                            ms.market.strike_price = Some(s);
+                            ms.market.strike_fetched = true;
+                            info!("[{}] Strike: ${:.2}", ms.tag, s);
 
                             // Flag for post-loop resubscribe with ALL tokens
                             // (calling stream() here with only 2 tokens would kill
@@ -1131,8 +1175,8 @@ async fn main() -> Result<()> {
         // all symbols with the same server-assigned timestamp. This is NOT a routing
         // bug — the per-asset prices below prove each asset receives independent data.
         if tick % 500 == 0 {
-            for asset in &["btc", "eth", "sol", "xrp"] {
-                if let Some(rtds) = rtds_per_asset.get(*asset) {
+            for asset in &unique_assets {
+                if let Some(rtds) = rtds_per_asset.get(asset.as_str()) {
                     let (asset_b, asset_c) = multi_rtds.update_counts(asset);
                     info!(
                         "[RTDS] {:<3} price=B:{:.4}/C:{:.4} dev=B:{:+.1}/C:{:+.1}bps stale=B:{}ms/C:{}ms n=B:{}/C:{}",
