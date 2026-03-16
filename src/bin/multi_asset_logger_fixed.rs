@@ -561,11 +561,14 @@ async fn main() -> Result<()> {
                 println!(" {} YES:{}... NO:{}...", m.unique_id,
                     truncate_id(&m.yes_token_id, 8, 0),
                     truncate_id(&m.no_token_id, 8, 0));
-                let base_stem = if csv_dir == "." {
-                    format!("{}_{}_data", cfg.asset, timeframe_label(cfg.timeframe_secs))
+                let tf = timeframe_label(cfg.timeframe_secs);
+                let market_dir = if csv_dir == "." {
+                    format!("{}/{}", cfg.asset, tf)
                 } else {
-                    format!("{}/{}_{}_data", csv_dir, cfg.asset, timeframe_label(cfg.timeframe_secs))
+                    format!("{}/{}/{}", csv_dir, cfg.asset, tf)
                 };
+                std::fs::create_dir_all(&market_dir)?;
+                let base_stem = format!("{}/{}_{}_data", market_dir, cfg.asset, tf);
                 market_states.push(MarketState {
                     config_idx: i,
                     market: m,
