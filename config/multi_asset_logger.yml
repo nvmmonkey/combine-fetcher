@@ -13,26 +13,26 @@ markets:
     timeframe: 5m
     binance_symbol: BTCUSDT
 
-  # - asset: btc
-  #   timeframe: 15m
-  #   binance_symbol: BTCUSDT
+  - asset: btc
+    timeframe: 15m
+    binance_symbol: BTCUSDT
 
-  # - asset: eth
-  #   timeframe: 5m
-  #   binance_symbol: ETHUSDT
+  - asset: eth
+    timeframe: 5m
+    binance_symbol: ETHUSDT
 
-  # - asset: eth
-  #   timeframe: 15m
-  #   binance_symbol: ETHUSDT
+  - asset: eth
+    timeframe: 15m
+    binance_symbol: ETHUSDT
 
-  # - asset: sol
-  #   timeframe: 5m
-  #   binance_symbol: SOLUSDT
+  - asset: sol
+    timeframe: 5m
+    binance_symbol: SOLUSDT
 
-  # - asset: sol
-  #   timeframe: 15m
-  #   binance_symbol: SOLUSDT
+  - asset: sol
+    timeframe: 15m
+    binance_symbol: SOLUSDT
 
-  # - asset: xrp
-  #   timeframe: 15m
-  #   binance_symbol: XRPUSDT
+  - asset: xrp
+    timeframe: 15m
+    binance_symbol: XRPUSDT

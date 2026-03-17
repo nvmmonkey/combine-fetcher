@@ -7,6 +7,9 @@
 //! Run both loggers side-by-side to compare RTDS lag/stale data quality.
 //!
 //! Usage: cargo run --bin multi_asset_logger_fixed -- [--config path.yml] [duration_secs] [csv_dir] [record_interval_sec]
+
+//  ./multi_asset_logger_fixed --config ./multi_asset_logger.yml 186400 ./ 0
+
 //!
 //! Without --config, defaults to BTC 5m only.
 
