@@ -36,6 +36,13 @@ path = "src/bin/multi_market_logger_hourly_fixed.rs"
 name = "multi_asset_logger_fixed"
 path = "src/bin/multi_asset_logger_fixed.rs"
 
+[[bin]]
+name = "hourly_asset_logger"
+path = "src/bin/hourly_asset_logger.rs"
+
+[[bin]]
+name = "multi_asset_logger_fixed_rotation"
+path = "src/bin/multi_asset_logger_fixed_rotation.rs"
 
 # [[bin]]
 # name = "test_binance_bootstrap"
