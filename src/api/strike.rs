@@ -40,7 +40,7 @@ struct PolymarketStrikeResponse {
 /// Map window_seconds to the Polymarket variant query parameter.
 fn variant_for_window(window_seconds: i64) -> &'static str {
     if window_seconds == 300 {
-        "five"
+        "fiveminute"
     } else {
         "fifteen"
     }
@@ -49,7 +49,7 @@ fn variant_for_window(window_seconds: i64) -> &'static str {
 /// Build the Polymarket crypto-price API URL for a given market's time window.
 ///
 /// Derives `symbol` from `market.asset` (uppercased, defaults to "BTC" if empty)
-/// and `variant` from `market.window_seconds` (300 -> "five", else "fifteen").
+/// and `variant` from `market.window_seconds` (300 -> "fiveminute", else "fifteen").
 fn build_strike_url(market: &MarketInfo) -> Result<String> {
     let symbol = if market.asset.is_empty() {
         "BTC".to_string()
