@@ -1,0 +1,35 @@
+# Hourly Asset Logger Configuration
+#
+# Usage:
+#   cargo run --bin hourly_asset_logger -- --config config/hourly_asset_logger.yml 28800 ./hourly 1
+#
+# Each entry defines a Polymarket hourly up-or-down market to track.
+#   asset:          lowercase ticker (btc, eth, sol, xrp)
+#   timeframe:      "1h" (only 1h supported by hourly logger)
+#   binance_symbol: Binance perpetual/spot symbol for price feed
+#
+# Hourly markets use human-readable slugs like:
+#   bitcoin-up-or-down-march-17-2026-8am-et
+#   ethereum-up-or-down-march-17-5am-et
+#   solana-up-or-down-march-16-2026-10am-et
+#   xrp-up-or-down-march-17-2026-3pm-et
+#
+# Market discovery uses Gamma API search (slug_contains) instead of
+# slug construction, because hourly slug format varies.
+
+markets:
+  - asset: btc
+    timeframe: 1h
+    binance_symbol: BTCUSDT
+
+  - asset: eth
+    timeframe: 1h
+    binance_symbol: ETHUSDT
+
+  - asset: sol
+    timeframe: 1h
+    binance_symbol: SOLUSDT
+
+  - asset: xrp
+    timeframe: 1h
+    binance_symbol: XRPUSDT

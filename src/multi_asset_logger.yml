@@ -1,0 +1,38 @@
+# Multi-Asset Logger Configuration
+#
+# Usage:
+#   cargo run --bin multi_asset_logger_fixed -- --config config/multi_asset_logger.yml 28800 ./data 1
+#
+# Each entry defines a Polymarket up/down market to track.
+#   asset:          lowercase ticker used in Gamma API slug (btc, eth, sol, xrp)
+#   timeframe:      "5m" or "15m"
+#   binance_symbol: Binance perpetual/spot symbol for price feed
+
+markets:
+  - asset: btc
+    timeframe: 5m
+    binance_symbol: BTCUSDT
+
+  - asset: btc
+    timeframe: 15m
+    binance_symbol: BTCUSDT
+
+  - asset: eth
+    timeframe: 5m
+    binance_symbol: ETHUSDT
+
+  - asset: eth
+    timeframe: 15m
+    binance_symbol: ETHUSDT
+
+  - asset: sol
+    timeframe: 5m
+    binance_symbol: SOLUSDT
+
+  - asset: sol
+    timeframe: 15m
+    binance_symbol: SOLUSDT
+
+#  - asset: xrp
+#    timeframe: 15m
+#    binance_symbol: XRPUSDT
