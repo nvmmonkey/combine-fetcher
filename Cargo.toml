@@ -48,6 +48,10 @@ path = "src/bin/multi_asset_logger_fixed_rotation.rs"
 name = "multi_asset_logger_fixed_rotation_sbe"
 path = "src/bin/multi_asset_logger_fixed_rotation_sbe.rs"
 
+[[bin]]
+name = "multi_asset_logger_fixed_rotation_sbe_obi"
+path = "src/bin/multi_asset_logger_fixed_rotation_sbe_obi.rs"
+
 # [[bin]]
 # name = "test_binance_bootstrap"
 # path = "src/bin/test_binance_bootstrap.rs"

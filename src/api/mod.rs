@@ -6,6 +6,7 @@
 pub mod binance;
 pub mod binance_fixed;
 pub mod binance_fixed_sbe;
+pub mod binance_fixed_sbe_obi;
 pub mod gamma;
 pub mod market_events;
 pub mod polymarket;
