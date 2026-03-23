@@ -744,7 +744,7 @@ async fn main() -> Result<()> {
         .collect();
 
     let mut rx = poly_stream.clone().stream(all_token_ids.clone()).await?;
-    tokio::spawn(async move {
+    let mut poly_drain_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
         while let Some(_update) = rx.recv().await {}
     });
     println!("Polymarket connected ({} tokens)", market_states.len() * 2);
@@ -982,8 +982,10 @@ async fn main() -> Result<()> {
                 "[POLY] PRE-WARM: Re-subscribing {} tokens (current + pre-warm)",
                 unique_tokens.len(),
             );
+            // Abort old drain task before creating new stream (prevents zombie accumulation)
+            poly_drain_handle.abort();
             let mut new_rx = poly_stream.clone().stream(unique_tokens).await?;
-            tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
+            poly_drain_handle = tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
             // Short sleep to let WS connect (less than rotation, data starts flowing)
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -1289,12 +1291,6 @@ async fn main() -> Result<()> {
             let has_outcome = !outcome.is_empty();
 
             if resolved && (has_outcome || grace_expired) {
-                if grace_expired && !has_outcome {
-                    warn!("[{}] Resolution grace period expired with no outcome -- forcing rotation", ms.tag);
-                } else if has_outcome {
-                    info!("[{}] Outcome '{}' detected -- rotating", ms.tag, outcome);
-                }
-
                 let time_since_last = if ms.last_fetch_attempt_ms > 0 {
                     now_ms.saturating_sub(ms.last_fetch_attempt_ms)
                 } else { i64::MAX };
@@ -1303,7 +1299,19 @@ async fn main() -> Result<()> {
                     || (time_since_last >= FETCH_RETRY_COOLDOWN_MS
                         && ms.consecutive_fetch_failures < MAX_CONSECUTIVE_FETCH_FAILURES);
 
-                if should_attempt {
+                if !should_attempt {
+                    // Already exhausted retries or in cooldown — don't spam logs.
+                    // Will retry after cooldown if under max failures.
+                    continue;
+                }
+
+                if grace_expired && !has_outcome {
+                    warn!("[{}] Resolution grace period expired with no outcome -- forcing rotation", ms.tag);
+                } else if has_outcome {
+                    info!("[{}] Outcome '{}' detected -- rotating", ms.tag, outcome);
+                }
+
+                {
                     ms.last_fetch_attempt_ms = now_ms;
                     info!("[{}] Market {} expired (TTX={:.1}m) -- rotating...",
                         ms.tag, ms.market.unique_id, ttx);
@@ -1477,8 +1485,10 @@ async fn main() -> Result<()> {
                 ])
                 .collect();
             info!("[POLY] Re-subscribing all {} tokens after rotation", all_tokens.len());
+            // Abort old drain task before creating new stream (prevents zombie accumulation)
+            poly_drain_handle.abort();
             let mut new_rx = poly_stream.clone().stream(all_tokens).await?;
-            tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
+            poly_drain_handle = tokio::spawn(async move { while let Some(_) = new_rx.recv().await {} });
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 

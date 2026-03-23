@@ -52,6 +52,10 @@ path = "src/bin/multi_asset_logger_fixed_rotation_sbe.rs"
 name = "multi_asset_logger_fixed_rotation_sbe_obi"
 path = "src/bin/multi_asset_logger_fixed_rotation_sbe_obi.rs"
 
+[[bin]]
+name = "signal_engine"
+path = "src/bin/signal_engine.rs"
+
 # [[bin]]
 # name = "test_binance_bootstrap"
 # path = "src/bin/test_binance_bootstrap.rs"
@@ -86,12 +90,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rust_decimal = "1.40.0"
 
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Shared memory signal output
+signal-shm = { path = "signal-shm" }
+
 # dashboard
 ratatui   = "0.29"
 crossterm = "0.28"
 
 [features]
 default = []
+
+[patch.crates-io]
+polymarket-client-sdk = { path = "polymarket-client-sdk-patched" }
 
 [profile.release]
 opt-level = 3
