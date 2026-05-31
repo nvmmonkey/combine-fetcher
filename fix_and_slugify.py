@@ -29,6 +29,7 @@ import requests
 # ============================================================================
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
+CRYPTO_PRICE_API_URL = "https://polymarket.com/api/crypto/crypto-price"
 HTTP_TIMEOUT = 10
 API_DELAY = 0.2  # seconds between API calls (polite rate limiting)
 MIN_ROWS_PER_SLUG = 10000  # slugs with fewer rows are incomplete — skip
@@ -71,6 +72,56 @@ def fetch_outcome(slug: str, session: requests.Session) -> str | None:
     except Exception as e:
         print(f"    [WARN] {slug} -> {e}")
     return None
+
+def parse_slug(slug: str) -> dict | None:
+    """Parse slug like 'btc-updown-15m-1775541600' into components."""
+    parts = slug.split("-")
+    # Expected: {asset}-updown-{window}-{epoch}
+    if len(parts) < 4 or parts[1] != "updown":
+        return None
+    try:
+        asset = parts[0].upper()  # BTC, ETH, SOL
+        window_str = parts[2]     # "15m" or "5m"
+        epoch = int(parts[3])
+        window_secs = 900 if window_str == "15m" else 300 if window_str == "5m" else None
+        variant = "fifteen" if window_str == "15m" else "fiveminute" if window_str == "5m" else None
+        if not window_secs or not variant:
+            return None
+        return {"asset": asset, "variant": variant, "window_secs": window_secs, "epoch": epoch}
+    except (ValueError, IndexError):
+        return None
+
+
+def fetch_api_strike(slug: str, session: requests.Session) -> float | None:
+    """Fetch authoritative strike price from Polymarket crypto-price API.
+
+    Derives symbol, variant, and window from the slug. Works for any asset
+    (BTC/ETH/SOL) and any window (5m/15m). Returns None on timeout/failure
+    so fix_and_slugify can fall back to internal correction.
+    """
+    from datetime import datetime, timezone
+    parsed = parse_slug(slug)
+    if not parsed:
+        return None
+    start_dt = datetime.fromtimestamp(parsed["epoch"], tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(parsed["epoch"] + parsed["window_secs"], tz=timezone.utc)
+    url = (
+        f"{CRYPTO_PRICE_API_URL}?symbol={parsed['asset']}"
+        f"&eventStartTime={start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"&variant={parsed['variant']}"
+        f"&endDate={end_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+    )
+    try:
+        resp = session.get(url, timeout=5)  # short timeout — don't block pipeline
+        if resp.status_code == 200:
+            data = resp.json()
+            price = data.get("openPrice")
+            if price and isinstance(price, (int, float)) and price > 0:
+                return float(price)
+    except Exception:
+        pass  # silent — API failure is not fatal, fall back to internal correction
+    return None
+
 
 # ============================================================================
 # CSV LOADING
@@ -170,6 +221,37 @@ def write_per_slug(df: pd.DataFrame, output_dir: str, outcome_cache: dict) -> li
         if "timestamp" in group.columns:
             group.sort_values("timestamp", inplace=True)
             group.reset_index(drop=True, inplace=True)
+
+        # Fix stale strike: 3-layer validation
+        # Layer 1: Internal — if logger self-corrected (multiple unique values), use last
+        # Layer 2: API — fetch authoritative openPrice from Polymarket crypto-price API
+        # Layer 3: Fallback — if API fails, use the internal correction (or original)
+        if "strike_price" in group.columns:
+            strikes = group["strike_price"].dropna()
+            strikes = strikes[strikes > 0]
+            if len(strikes) > 0:
+                unique_strikes = strikes.unique()
+                csv_strike = float(strikes.iloc[-1])  # last value (possibly corrected)
+                old_strike = float(unique_strikes[0])
+
+                # Layer 1: internal correction
+                if len(unique_strikes) > 1:
+                    print(f"    [FIX] strike internal: {old_strike:.2f} -> {csv_strike:.2f}  ({len(unique_strikes)} unique values)")
+
+                # Layer 2: API verification (non-blocking — timeout=5s, silent on failure)
+                api_strike = fetch_api_strike(slug, requests.Session())
+                if api_strike:
+                    api_diff = abs(api_strike - csv_strike)
+                    if api_diff > 1.0:
+                        print(f"    [FIX] strike API: {csv_strike:.2f} -> {api_strike:.2f}  (Δ${api_diff:.2f})")
+                        group["strike_price"] = api_strike
+                    elif len(unique_strikes) > 1:
+                        # API confirms the internal correction
+                        group["strike_price"] = csv_strike
+                    time.sleep(API_DELAY)
+                elif len(unique_strikes) > 1:
+                    # Layer 3: API failed, use internal correction
+                    group["strike_price"] = csv_strike
 
         # Fetch outcome from API
         api_outcome = outcome_cache.get(slug)
