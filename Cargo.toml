@@ -62,7 +62,7 @@ path = "src/bin/signal_engine.rs"
 
 [dependencies]
 # Polymarket SDK (local vendor path)
-polymarket-client-sdk = { version = "0.4.1", features = ["clob", "ws", "rtds"] }
+polymarket_client_sdk_v2 = { path = "../poly-bot/crates/polymarket-client-sdk-v2-patched", default-features = false, features = ["clob", "ws", "rtds", "heartbeats"] }
 # Async runtime
 tokio = { version = "1.35", features = ["full", "signal"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
@@ -103,8 +103,9 @@ crossterm = "0.28"
 [features]
 default = []
 
-[patch.crates-io]
-polymarket-client-sdk = { path = "polymarket-client-sdk-patched" }
+# V1 SDK [patch.crates-io] removed during V2 upgrade (2026-04-28).
+# Replaced by direct dep on poly-bot's vendored polymarket_client_sdk_v2 patched copy
+# (different package name, so [patch.crates-io] cannot redirect — must be a direct dep).
 
 [profile.release]
 opt-level = 3

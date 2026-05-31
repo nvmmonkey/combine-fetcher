@@ -127,7 +127,7 @@ impl MultiAssetRtdsTracker {
 
     /// Start background RTDS streaming tasks (one Binance + one Chainlink connection).
     pub fn start(&mut self) {
-        use polymarket_client_sdk::rtds::Client;
+        use polymarket_client_sdk_v2::rtds::Client;
 
         let client = Arc::new(Client::default());
 
@@ -249,7 +249,7 @@ const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 
 async fn multi_rtds_binance_loop(
     feeds: HashMap<String, Arc<RtdsPriceSource>>,
-    client: Arc<polymarket_client_sdk::rtds::Client>,
+    client: Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) {
     let mut delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -281,7 +281,7 @@ async fn multi_rtds_binance_loop(
 
 async fn multi_rtds_chainlink_loop(
     feeds: HashMap<String, Arc<RtdsPriceSource>>,
-    client: Arc<polymarket_client_sdk::rtds::Client>,
+    client: Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) {
     let mut delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -309,7 +309,7 @@ async fn multi_rtds_chainlink_loop(
 
 async fn connect_multi_rtds_binance(
     feeds: &HashMap<String, Arc<RtdsPriceSource>>,
-    client: &Arc<polymarket_client_sdk::rtds::Client>,
+    client: &Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) -> anyhow::Result<u64> {
     // ✅ None = subscribe to ALL symbols, filter manually below.
     // Some(vec!["btcusdt"]) silently produces an empty stream — SDK bug.
@@ -389,7 +389,7 @@ async fn connect_multi_rtds_binance(
 
 async fn connect_multi_rtds_chainlink(
     feeds: &HashMap<String, Arc<RtdsPriceSource>>,
-    client: &Arc<polymarket_client_sdk::rtds::Client>,
+    client: &Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) -> anyhow::Result<u64> {
     // ✅ None = subscribe to ALL symbols, filter manually below.
     // Some(vec![...]) silently produces an empty stream — SDK bug.

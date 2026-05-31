@@ -10,8 +10,8 @@
 
 use anyhow::Result;
 use futures::StreamExt;
-use polymarket_client_sdk::clob::ws::Client as WsClient;
-use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk_v2::clob::ws::Client as WsClient;
+use polymarket_client_sdk_v2::types::U256;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};

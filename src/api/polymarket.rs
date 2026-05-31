@@ -12,12 +12,12 @@
 use anyhow::{anyhow, Result};
 use dashmap::DashMap;
 use futures::StreamExt;
-use polymarket_client_sdk::clob::types::request::{LastTradePriceRequest, MidpointRequest};
-use polymarket_client_sdk::clob::types::Side;
-use polymarket_client_sdk::clob::ws::Client as WsClient;
-use polymarket_client_sdk::clob::ws::LastTradePrice;
-use polymarket_client_sdk::clob::{Client as ClobClient, Config};
-use polymarket_client_sdk::types::U256;
+use polymarket_client_sdk_v2::clob::types::request::{LastTradePriceRequest, MidpointRequest};
+use polymarket_client_sdk_v2::clob::types::Side;
+use polymarket_client_sdk_v2::clob::ws::Client as WsClient;
+use polymarket_client_sdk_v2::clob::ws::LastTradePrice;
+use polymarket_client_sdk_v2::clob::{Client as ClobClient, Config};
+use polymarket_client_sdk_v2::types::U256;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive}; // <-- FIXED: Added FromPrimitive back
 use rust_decimal::Decimal;
 use std::str::FromStr;

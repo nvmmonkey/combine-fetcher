@@ -126,7 +126,7 @@ impl RtdsTracker {
 
     /// Start background RTDS streaming tasks.
     pub fn start(&mut self) {
-        use polymarket_client_sdk::rtds::Client;
+        use polymarket_client_sdk_v2::rtds::Client;
 
         let client = Arc::new(Client::default());
 
@@ -348,7 +348,7 @@ const RECONNECT_BACKOFF_MULTIPLIER: f64 = 2.0;
 
 async fn rtds_binance_loop(
     feed: Arc<RtdsPriceSource>,
-    client: Arc<polymarket_client_sdk::rtds::Client>,
+    client: Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) {
     let mut delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -380,7 +380,7 @@ async fn rtds_binance_loop(
 
 async fn rtds_chainlink_loop(
     feed: Arc<RtdsPriceSource>,
-    client: Arc<polymarket_client_sdk::rtds::Client>,
+    client: Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) {
     let mut delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -408,7 +408,7 @@ async fn rtds_chainlink_loop(
 
 async fn connect_rtds_binance(
     feed: &Arc<RtdsPriceSource>,
-    client: &Arc<polymarket_client_sdk::rtds::Client>,
+    client: &Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) -> anyhow::Result<u64> {
     // ✅ None = subscribe to ALL symbols, filter manually below.
     // Some(vec!["btcusdt"]) silently produces an empty stream — SDK bug.
@@ -470,7 +470,7 @@ async fn connect_rtds_binance(
 
 async fn connect_rtds_chainlink(
     feed: &Arc<RtdsPriceSource>,
-    client: &Arc<polymarket_client_sdk::rtds::Client>,
+    client: &Arc<polymarket_client_sdk_v2::rtds::Client>,
 ) -> anyhow::Result<u64> {
     let symbol = "btc/usd".to_owned();
 
