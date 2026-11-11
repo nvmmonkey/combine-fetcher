@@ -762,12 +762,9 @@ impl BinanceDataManager {
                 .insert(symbol.clone(), Arc::new(Mutex::new(VolumeTracker::new())));
         }
 
-        // Read API key from environment, fallback to hardcoded key
-        let api_key = std::env::var("BINANCE_API_KEY").unwrap_or_else(|_| {
-            const FALLBACK_KEY: &str = "[redacted]";
-            warn!("BINANCE_API_KEY not set — using hardcoded fallback key");
-            FALLBACK_KEY.to_string()
-        });
+        // Read API key from environment (Ed25519 key for SBE endpoint auth)
+        let api_key = std::env::var("BINANCE_API_KEY")
+            .map_err(|_| anyhow!("BINANCE_API_KEY not set (Binance Ed25519 API key for the SBE stream)"))?;
 
         // Build SBE combined stream URL: bestBidAsk + trade + depth20 for all symbols
         let sbe_streams: Vec<String> = self
